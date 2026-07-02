@@ -49,6 +49,26 @@ def test_forecast_curve_shape(event_result):
     assert curve.shape == (10, max(cfg.horizons_steps))
 
 
+def test_curve_band_brackets_median():
+    from insulink_predictor.eval.harness import run_curve
+
+    cfg = Config(
+        synth={"n_users": 3, "days": 12, "seed": 2},
+        split={"test_fraction": 0.2},
+        mlflow={"enabled": False},
+    )
+    grid = align(generate(cfg), cfg)
+    res = run_curve(cfg, df=grid, horizon_min=30, n=2, band=True, lo=0.1, hi=0.9)
+    assert res["examples"], "expected at least one banded curve"
+    for ex in res["examples"]:
+        lower = np.array(ex["lower"])
+        upper = np.array(ex["upper"])
+        pred = np.array(ex["predicted"])  # median
+        assert (lower <= upper + 1e-6).all()              # no quantile crossing
+        assert (lower <= pred + 1e-6).all() and (pred <= upper + 1e-6).all()
+        assert (upper - lower).mean() > 0                 # band has real width
+
+
 def test_detect_events_flags_meals():
     cfg = Config(synth={"n_users": 2, "days": 5, "seed": 1})
     grid = align(generate(cfg), cfg)

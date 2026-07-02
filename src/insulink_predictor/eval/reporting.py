@@ -59,8 +59,8 @@ def plot_feature_importance(fi: pd.DataFrame, path: str | Path, top: int = 20) -
 def plot_curves(examples: list[dict], path: str | Path) -> Path:
     """Plot predicted vs actual post-event trajectories.
 
-    Each example: ``{title, minutes, predicted, actual}`` (minutes/predicted/actual
-    are equal-length sequences over the forecast horizon).
+    Each example: ``{title, minutes, predicted, actual}``; optionally ``lower`` /
+    ``upper`` (a shaded uncertainty band) and ``band`` = (lo, hi) quantile levels.
     """
     import matplotlib
 
@@ -71,18 +71,26 @@ def plot_curves(examples: list[dict], path: str | Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     n = max(1, len(examples))
     horizon = int(examples[0]["minutes"][-1]) if examples else 0
+    banded = any("lower" in ex for ex in examples)
     fig, axes = plt.subplots(
         1, n, figsize=(4.6 * n, 3.8), squeeze=False, constrained_layout=True
     )
     for ax, ex in zip(axes[0], examples):
         m = [0, *ex["minutes"]]
+        if "lower" in ex and "upper" in ex:
+            lo, hi = ex.get("band", (0.1, 0.9))
+            ax.fill_between(
+                m, [ex["g0"], *ex["lower"]], [ex["g0"], *ex["upper"]],
+                color="#d8543b", alpha=0.18,
+                label=f"{int(lo * 100)}–{int(hi * 100)}% band",
+            )
         ax.plot(m, [ex["g0"], *ex["actual"]], "o-", color="#222", label="actual", ms=3)
         ax.plot(
             m,
             [ex["g0"], *ex["predicted"]],
             "s--",
             color="#d8543b",
-            label="forecast",
+            label="forecast" if not banded else "forecast (median)",
             ms=3,
         )
         ax.axhline(ex["g0"], color="#999", ls=":", lw=1, label="persistence")
@@ -90,10 +98,8 @@ def plot_curves(examples: list[dict], path: str | Path) -> Path:
         ax.set_xlabel("minutes ahead")
         ax.set_ylabel("glucose (mg/dL)")
         ax.legend(fontsize=7)
-    fig.suptitle(
-        f"{horizon}-min glucose forecast — predicted vs actual vs persistence",
-        fontsize=11,
-    )
+    subtitle = "median + uncertainty band vs actual" if banded else "predicted vs actual vs persistence"
+    fig.suptitle(f"{horizon}-min glucose forecast — {subtitle}", fontsize=11)
     fig.savefig(path, dpi=120)
     plt.close(fig)
     return path

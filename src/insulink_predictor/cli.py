@@ -111,6 +111,11 @@ def curve(
     metrics: bool = typer.Option(
         False, "--metrics", help="Also print skill/RMSE vs persistence for the window."
     ),
+    band: bool = typer.Option(
+        True, "--band/--no-band", help="Draw a quantile uncertainty band around the forecast."
+    ),
+    lo: float = typer.Option(0.1, help="Lower band quantile (e.g. 0.1)."),
+    hi: float = typer.Option(0.9, help="Upper band quantile (e.g. 0.9)."),
     out: Optional[Path] = typer.Option(
         None, help="Output PNG (default: reports/curves_<h>min.png)."
     ),
@@ -145,7 +150,8 @@ def curve(
         grid = grid[grid["user_id"] == user]
 
     res = run_curve(
-        cfg, df=grid, horizon_min=horizon_min, n=n, at=at, out=out, metrics=metrics
+        cfg, df=grid, horizon_min=horizon_min, n=n, at=at, out=out,
+        metrics=metrics, band=band, lo=lo, hi=hi,
     )
     if res.get("metrics") is not None and not res["metrics"].empty:
         typer.echo(

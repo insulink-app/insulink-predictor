@@ -222,18 +222,21 @@ def subset_skill(
 
 
 def _curve_examples(
-    test, curve_models, feature_cols, cfg, max_step=None, n=3, at=None
+    test, curve_models, feature_cols, cfg, max_step=None, n=3, at=None, qmodels=None
 ) -> list[dict]:
     """Forecast trajectories with a fully-observed future.
 
     Selection: post-meal events by default, or the bucket nearest ``at`` (a
     timestamp) if given. ``max_step`` sets the curve length (defaults to the
-    longest configured horizon).
+    longest configured horizon). If ``qmodels`` is given, each example also gets a
+    ``lower``/``upper`` uncertainty band (the plotted line becomes the median).
     """
     from ..models.events import forecast_curve
 
+    delta = cfg.features.predict_delta
     max_step = max_step or max(cfg.horizons_steps)
     has_future = test[f"cvalid_{max_step}"].to_numpy()
+    q_lo, q_hi = (min(qmodels), max(qmodels)) if qmodels else (None, None)
 
     if at is not None:
         at_ts = pd.Timestamp(at)
@@ -256,24 +259,28 @@ def _curve_examples(
     examples = []
     for j in picks:
         row = test.iloc[[j]]
-        pred = forecast_curve(
-            row, curve_models, feature_cols, cfg.features.predict_delta
-        )[0][:max_step]
+        pred = forecast_curve(row, curve_models, feature_cols, delta)[0][:max_step]
         actual = [float(test.iloc[j][f"cy_{k}"]) for k in range(1, max_step + 1)]
         ts = pd.Timestamp(test.iloc[j]["ts_local"]).strftime("%a %d.%m %H:%M")
         tag = "meal" if bool(test.iloc[j].get("event_meal", False)) else "t"
-        uid_short = str(test.iloc[j]["user_id"])[
-            :8
-        ]  # keep titles short so they don't overlap
-        examples.append(
-            {
-                "title": f"{uid_short}… · {tag} @ {ts}",
-                "g0": float(test.iloc[j]["glucose_mgdl"]),
-                "minutes": minutes,
-                "predicted": [float(x) for x in pred],
-                "actual": actual,
-            }
-        )
+        uid_short = str(test.iloc[j]["user_id"])[:8]  # short titles so they don't overlap
+        ex = {
+            "title": f"{uid_short}… · {tag} @ {ts}",
+            "g0": float(test.iloc[j]["glucose_mgdl"]),
+            "minutes": minutes,
+            "predicted": [float(x) for x in pred],
+            "actual": actual,
+        }
+        if qmodels is not None:
+            qf = {q: forecast_curve(row, m, feature_cols, delta)[0][:max_step] for q, m in qmodels.items()}
+            # sort across quantiles per step to prevent crossing
+            stacked = np.sort(np.vstack([qf[q] for q in sorted(qf)]), axis=0)
+            ex["lower"] = [float(x) for x in stacked[0]]
+            ex["upper"] = [float(x) for x in stacked[-1]]
+            if 0.5 in qmodels:
+                ex["predicted"] = [float(x) for x in qf[0.5]]  # median is the central line
+            ex["band"] = (q_lo, q_hi)
+        examples.append(ex)
     return examples
 
 
@@ -314,15 +321,21 @@ def _curve_metrics(test, cfg, curve_models, feature_cols, max_step) -> pd.DataFr
 
 
 def run_curve(
-    cfg, df=None, horizon_min=60, n=3, at=None, out=None, metrics=False
+    cfg, df=None, horizon_min=60, n=3, at=None, out=None, metrics=False, band=False, lo=0.1, hi=0.9
 ) -> dict:
     """Train curve models on the early data and plot forecast trajectories.
 
     Forecasts are out-of-sample: the chronological tail (test split) is where the
     curves are drawn, after training on the earlier portion. With ``metrics``, also
-    score the whole forecast window vs persistence at the horizon.
+    score the whole forecast window vs persistence at the horizon. With ``band``,
+    also train ``lo``/0.5/``hi`` quantile models and draw an uncertainty band.
     """
-    from ..models.events import build_curve_targets, detect_events, train_curve_models
+    from ..models.events import (
+        build_curve_targets,
+        detect_events,
+        train_curve_models,
+        train_quantile_curve_models,
+    )
 
     sup, feature_cols = build_supervised(cfg, df)
     max_step = max(1, horizon_min // cfg.grid_minutes)
@@ -343,8 +356,15 @@ def run_curve(
     curve_models = train_curve_models(
         train, feature_cols, max_step, cfg.features.predict_delta
     )
+    qmodels = (
+        train_quantile_curve_models(
+            train, feature_cols, max_step, (lo, 0.5, hi), cfg.features.predict_delta
+        )
+        if band
+        else None
+    )
     examples = _curve_examples(
-        test, curve_models, feature_cols, cfg, max_step=max_step, n=n, at=at
+        test, curve_models, feature_cols, cfg, max_step=max_step, n=n, at=at, qmodels=qmodels
     )
 
     out = (

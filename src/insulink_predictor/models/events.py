@@ -84,3 +84,33 @@ def forecast_curve(
     if predict_delta:
         preds = preds + df["glucose_mgdl"].to_numpy()[:, None]
     return preds
+
+
+def _make_quantile_regressor(alpha: float):
+    reg = _make_regressor()
+    reg.set_params(objective="quantile", alpha=alpha)
+    return reg
+
+
+def train_quantile_curve_models(train, feature_cols, max_step, quantiles, predict_delta=True) -> dict:
+    """Train per-step quantile models for each level → {quantile: {step: model}}.
+
+    Quantiles of the *change* over persistence, so the band widens exactly where
+    the outcome is genuinely uncertain (e.g. big post-meal windows).
+    """
+    models: dict[float, dict] = {}
+    for q in quantiles:
+        mq: dict[int, object] = {}
+        for k in range(1, max_step + 1):
+            mask = train[f"cvalid_{k}"].to_numpy()
+            y = train.loc[mask, f"cy_{k}"]
+            if predict_delta:
+                y = y - train.loc[mask, "glucose_mgdl"]
+            mq[k] = _make_quantile_regressor(q).fit(train.loc[mask, feature_cols], y)
+        models[q] = mq
+    return models
+
+
+def forecast_curve_quantiles(df, qmodels: dict, feature_cols, predict_delta=True) -> dict:
+    """Per-quantile trajectories → {quantile: array (n_rows, max_step)} (absolute mg/dL)."""
+    return {q: forecast_curve(df, m, feature_cols, predict_delta) for q, m in qmodels.items()}
