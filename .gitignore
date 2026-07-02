@@ -9,11 +9,12 @@ wheels/
 # Virtual environments
 .venv
 
-# Data (raw/interim/processed) — never committed (ROADMAP §2)
-data/
+# Data (raw/interim/processed) — never committed (ROADMAP §2).
+# Anchored to the repo root so it does NOT match the src/.../data/ subpackage.
+/data/
 
 # Experiment tracking
-mlruns/
+/mlruns/
 
 # OS / editor
 .DS_Store
