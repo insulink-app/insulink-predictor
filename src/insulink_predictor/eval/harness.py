@@ -210,26 +210,44 @@ def subset_skill(test: pd.DataFrame, cfg: Config, pred_fn: PredFn, mask: np.ndar
     return pd.DataFrame(rows)
 
 
-def _curve_examples(test: pd.DataFrame, curve_models, feature_cols, cfg, n: int = 3) -> list[dict]:
-    """Pick post-meal events with a fully-observed 60-min future; forecast the curve."""
+def _curve_examples(test, curve_models, feature_cols, cfg, max_step=None, n=3, at=None) -> list[dict]:
+    """Forecast trajectories with a fully-observed future.
+
+    Selection: post-meal events by default, or the bucket nearest ``at`` (a
+    timestamp) if given. ``max_step`` sets the curve length (defaults to the
+    longest configured horizon).
+    """
     from ..models.events import forecast_curve
 
-    max_step = max(cfg.horizons_steps)
-    ok = test["event_meal"].to_numpy() & test[f"cvalid_{max_step}"].to_numpy()
-    idx = np.flatnonzero(ok)
-    if idx.size == 0:
-        return []
-    picks = idx[np.linspace(0, idx.size - 1, num=min(n, idx.size)).astype(int)]
+    max_step = max_step or max(cfg.horizons_steps)
+    has_future = test[f"cvalid_{max_step}"].to_numpy()
+
+    if at is not None:
+        at_ts = pd.Timestamp(at)
+        at_ts = at_ts.tz_localize("UTC") if at_ts.tz is None else at_ts.tz_convert("UTC")
+        cand = test[has_future]
+        if cand.empty:
+            return []
+        pos = (cand["ts_utc"] - at_ts).abs().to_numpy().argmin()
+        picks = [int(np.flatnonzero(has_future)[pos])]
+    else:
+        ok = test["event_meal"].to_numpy() & has_future
+        idx = np.flatnonzero(ok)
+        if idx.size == 0:
+            return []
+        picks = idx[np.linspace(0, idx.size - 1, num=min(n, idx.size)).astype(int)]
+
     minutes = [k * cfg.grid_minutes for k in range(1, max_step + 1)]
     examples = []
     for j in picks:
         row = test.iloc[[j]]
-        pred = forecast_curve(row, curve_models, feature_cols)[0]
+        pred = forecast_curve(row, curve_models, feature_cols)[0][:max_step]
         actual = [float(test.iloc[j][f"cy_{k}"]) for k in range(1, max_step + 1)]
-        ts = pd.Timestamp(test.iloc[j]["ts_local"]).strftime("%a %H:%M")
+        ts = pd.Timestamp(test.iloc[j]["ts_local"]).strftime("%a %d.%m %H:%M")
+        tag = "meal" if bool(test.iloc[j].get("event_meal", False)) else "t"
         examples.append(
             {
-                "title": f"{test.iloc[j]['user_id']} · meal @ {ts}",
+                "title": f"{test.iloc[j]['user_id']} · {tag} @ {ts}",
                 "g0": float(test.iloc[j]["glucose_mgdl"]),
                 "minutes": minutes,
                 "predicted": [float(x) for x in pred],
@@ -237,6 +255,33 @@ def _curve_examples(test: pd.DataFrame, curve_models, feature_cols, cfg, n: int 
             }
         )
     return examples
+
+
+def run_curve(cfg, df=None, horizon_min=60, n=3, at=None, out=None) -> dict:
+    """Train curve models on the early data and plot forecast trajectories.
+
+    Forecasts are out-of-sample: the chronological tail (test split) is where the
+    curves are drawn, after training on the earlier portion.
+    """
+    from ..models.events import build_curve_targets, detect_events, train_curve_models
+
+    sup, feature_cols = build_supervised(cfg, df)
+    max_step = max(1, horizon_min // cfg.grid_minutes)
+    sup = build_curve_targets(sup, max_step)
+    sup = detect_events(sup, cfg)
+
+    train, test = chronological_split(sup, cfg.split.test_fraction)
+    if train[f"cvalid_{max_step}"].sum() < 50 or len(test) <= max_step:
+        return {"examples": [], "n_train": len(train), "n_test": len(test), "out": None,
+                "reason": "not enough data to train/forecast this range"}
+
+    curve_models = train_curve_models(train, feature_cols, max_step)
+    examples = _curve_examples(test, curve_models, feature_cols, cfg, max_step=max_step, n=n, at=at)
+
+    out = Path(out) if out else Path(cfg.paths.reports_dir) / f"curves_{horizon_min}min.png"
+    if examples:
+        plot_curves(examples, out)
+    return {"examples": examples, "n_train": int(len(train)), "n_test": int(len(test)), "out": out}
 
 
 def run_event_eval(cfg: Config, df: pd.DataFrame | None = None, write: bool = True) -> dict:

@@ -24,3 +24,6 @@ reports/db_inspection.json
 
 # OS / editor
 .DS_Store
+
+# Ad-hoc forecast curve outputs (vary per user/range/time)
+reports/curves_*.png

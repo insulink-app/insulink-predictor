@@ -82,6 +82,60 @@ def load(
     )
 
 
+@app.command()
+def curve(
+    config: Path = typer.Option(Path("config/config.yaml"), help="Path to config.yaml."),
+    source: str = typer.Option("db", help="Data source: 'db' (PostgreSQL) or 'synth'."),
+    user: Optional[str] = typer.Option(None, help="Restrict to a single user_id."),
+    since: Optional[str] = typer.Option(None, help="Range start date (UTC), e.g. 2026-05-01."),
+    until: Optional[str] = typer.Option(None, help="Range end date (UTC), e.g. 2026-06-01."),
+    horizon_min: int = typer.Option(60, help="Forecast horizon in minutes (e.g. 30)."),
+    n: int = typer.Option(3, help="Number of example curves (ignored when --at is set)."),
+    at: Optional[str] = typer.Option(None, help="Forecast from the bucket nearest this timestamp."),
+    out: Optional[Path] = typer.Option(None, help="Output PNG (default: reports/curves_<h>min.png)."),
+) -> None:
+    """Plot forecast trajectories (0..horizon min) for a user / DB time range.
+
+    Trains curve models on the earlier data and draws out-of-sample forecasts on
+    the chronological tail (predicted vs actual vs persistence).
+    """
+    import pandas as pd
+
+    from .data.align import align
+    from .eval.harness import run_curve
+
+    cfg = load_config(config)
+    if source == "synth":
+        from .data.synth import generate
+
+        grid = align(generate(cfg), cfg)
+    else:
+        from .data.load import load_raw
+
+        raw = load_raw(cfg, since=since, user_ids=[user] if user else None)
+        if raw.empty:
+            typer.echo("curve: no rows returned (check DATABASE_URL / filters).")
+            raise typer.Exit(code=1)
+        grid = align(raw, cfg)
+
+    if until:
+        grid = grid[grid["ts_utc"] <= pd.Timestamp(until, tz="UTC")]
+    if user:
+        grid = grid[grid["user_id"] == user]
+
+    res = run_curve(cfg, df=grid, horizon_min=horizon_min, n=n, at=at, out=out)
+    if not res["examples"]:
+        typer.echo(
+            f"curve: nothing to plot ({res.get('reason', 'no meal event / --at with full future')}); "
+            f"train={res['n_train']}, test={res['n_test']}. Try a wider range or --source synth."
+        )
+        raise typer.Exit(code=1)
+    typer.echo(
+        f"curve: {len(res['examples'])} forecast(s) over {horizon_min} min "
+        f"(train={res['n_train']}, test={res['n_test']}) -> {res['out']}"
+    )
+
+
 @app.command(name="db-inspect")
 def db_inspect(
     config: Path = typer.Option(Path("config/config.yaml"), help="Path to config.yaml."),
