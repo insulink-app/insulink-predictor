@@ -15,12 +15,32 @@ from ..config import Config
 
 _SEED = 42
 
+# Physiological sign of each therapy channel's effect on the (delta) target.
+# +1: raising the feature can only raise the forecast; −1: only lower it. Applied
+# as LightGBM monotone constraints when cfg.model.use_monotone is set. Momentum
+# features (rate_*) are deliberately left unconstrained — mean-reversion makes
+# their sign genuinely non-monotone.
+_MONOTONE_SIGNS = {
+    "cob": +1,
+    "cob_glucose": +1,
+    "carb_activity": +1,
+    "iob": -1,
+    "iob_glucose": -1,
+    "ins_activity": -1,
+}
 
-def _make_regressor() -> LGBMRegressor:
+
+def _monotone_vector(feature_cols: list[str]) -> list[int]:
+    return [_MONOTONE_SIGNS.get(c, 0) for c in feature_cols]
+
+
+def _make_regressor(
+    cfg: Config | None = None, feature_cols: list[str] | None = None
+) -> LGBMRegressor:
     # Regularized to curb over-reaction on quiet periods (real CGM is noisy). This
     # setting improves both the synthetic DoDs and real per-user skill vs the
     # lighter default; see diagnostics in the per-user analysis.
-    return LGBMRegressor(
+    reg = LGBMRegressor(
         n_estimators=350,
         learning_rate=0.04,
         num_leaves=16,
@@ -34,6 +54,24 @@ def _make_regressor() -> LGBMRegressor:
         deterministic=True,
         force_col_wise=True,
         verbose=-1,
+    )
+    if cfg is not None:
+        m = cfg.model
+        if m.objective == "huber":
+            reg.set_params(objective="huber", alpha=m.huber_delta)
+        if m.use_monotone and feature_cols is not None:
+            reg.set_params(monotone_constraints=_monotone_vector(feature_cols))
+    return reg
+
+
+def _excursion_weight(delta: np.ndarray, cfg: Config) -> np.ndarray | None:
+    """Sample weights that emphasize large excursions (|Δ| over persistence)."""
+    alpha = cfg.model.excursion_weight_alpha
+    if alpha <= 0:
+        return None
+    scale = float(np.std(delta)) or 1.0
+    return 1.0 + alpha * np.minimum(
+        np.abs(delta) / scale, cfg.model.excursion_weight_cap
     )
 
 
@@ -50,11 +88,12 @@ def train_lgbm(
     for h in cfg.horizons_steps:
         mask = train[f"valid_{h}"].to_numpy()
         X = train.loc[mask, feature_cols]
-        y = train.loc[mask, f"y_{h}"]
-        if delta:
-            y = y - train.loc[mask, "glucose_mgdl"]
-        model = _make_regressor()
-        model.fit(X, y)
+        excursion = (
+            train.loc[mask, f"y_{h}"] - train.loc[mask, "glucose_mgdl"]
+        ).to_numpy()
+        y = excursion if delta else train.loc[mask, f"y_{h}"].to_numpy()
+        model = _make_regressor(cfg, feature_cols)
+        model.fit(X, y, sample_weight=_excursion_weight(excursion, cfg))
         models[h] = model
     return models
 

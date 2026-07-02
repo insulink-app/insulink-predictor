@@ -271,6 +271,55 @@ def _run_eval(config: Path) -> None:
     typer.echo(f"Reports + feature importance written to {cfg.paths.reports_dir}/")
 
 
+@app.command()
+def backtest(
+    config: Path = typer.Option(
+        Path("config/config.yaml"), help="Path to config.yaml."
+    ),
+    source: str = typer.Option(
+        "synth", help="Data source: 'synth' or 'db' (PostgreSQL)."
+    ),
+    user: Optional[str] = typer.Option(None, help="Restrict to a single user_id (db)."),
+    since: Optional[str] = typer.Option(
+        None, help="Only rows on/after this date, e.g. 2026-04-01 (db)."
+    ),
+    folds: int = typer.Option(5, help="Number of rolling-origin (expanding) folds."),
+    test_span: float = typer.Option(
+        0.5, help="Fraction of each user's tail tiled into the test folds."
+    ),
+) -> None:
+    """Walk-forward skill with error bars — the trustworthy number (mean ± std).
+
+    Trains the direct multi-horizon model on several expanding chronological folds
+    (per user, embargoed) and reports skill mean ± std and the worst fold vs
+    persistence. A single 80/20 split (``gf eval``) hides this fold-to-fold noise.
+    With ``--source db`` the folds run on real data (credentials from env).
+    """
+    from .eval.backtest import run_backtest
+
+    cfg = load_config(config)
+    grid = None
+    if source == "db":
+        from .data.align import align
+        from .data.load import load_raw
+
+        raw = load_raw(cfg, since=since, user_ids=[user] if user else None)
+        if raw.empty:
+            typer.echo("backtest: no rows returned (check DATABASE_URL / filters).")
+            raise typer.Exit(code=1)
+        grid = align(raw, cfg)
+
+    res = run_backtest(cfg, df=grid, n_folds=folds, test_span=test_span, write=True)
+    typer.echo(
+        f"Walk-forward skill vs persistence ({source}, {folds} folds, expanding):"
+    )
+    typer.echo(res["summary"].to_string(index=False))
+    s = res["summary"]
+    verdict = "PASS" if (s["worst"] > 0).all() else "FAIL"
+    typer.echo(f"\nBeats persistence on every fold & horizon? {verdict}")
+    typer.echo(f"Reports written to {cfg.paths.reports_dir}/backtest_*.csv")
+
+
 @app.command(name="train-events")
 def train_events_cmd(
     config: Path = typer.Option(
