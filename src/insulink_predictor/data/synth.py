@@ -21,6 +21,11 @@ from ..config import Config
 _START = pd.Timestamp("2025-01-06 00:00:00", tz="UTC")
 _KERNEL_MIN = 240  # 4h support for meal / insulin / activity response kernels
 
+# Kernel peak fractions calibrated so effects stay in a realistic mg/dL range:
+# a ~80 g meal at CSF≈3.3 peaks ~+48 mg/dL; a bolus at ISF≈40 peaks ~dose·3.2.
+_CARB_PEAK_FRAC = 0.18   # peak carb rise = frac · carbs · csf   (csf = isf/icr)
+_INS_PEAK_FRAC = 0.08    # peak insulin drop = frac · dose · isf
+
 
 def _biexp_kernel(
     rise_tau: float, decay_tau: float, length: int = _KERNEL_MIN
@@ -49,8 +54,15 @@ def _simulate_user(user_idx: int, cfg: Config) -> pd.DataFrame:
     # can't fit all phases at once (they average out) — a per-user model can. This
     # is the honest source of the Phase-4 personalization moat.
     circ_phase = rng.uniform(0, 24)
-    meal_amp_scale = rng.uniform(0.8, 1.4)
-    meal_gain = rng.uniform(0.4, 0.7)  # mg/dL per gram of carbs at peak
+    # Per-user therapy physiology — the real app stores these in user_settings:
+    #   isf = correction factor    (mg/dL that 1U insulin lowers glucose)
+    #   icr = insulin-to-carb ratio (g carbs per 1U)
+    #   csf = carb sensitivity = isf/icr (mg/dL rise per g carbs) [clinical identity]
+    # A global model can't know each user's sensitivity from raw grams/units; the
+    # therapy features (cob·csf, iob·isf) hand it that scale directly.
+    isf = rng.uniform(25.0, 55.0)
+    icr = rng.uniform(8.0, 18.0)
+    csf = isf / icr
     rise_tau = rng.uniform(15, 25)
     decay_tau = rng.uniform(80, 110)
     noise_sd = rng.uniform(2.0, 5.0)
@@ -87,12 +99,12 @@ def _simulate_user(user_idx: int, cfg: Config) -> pd.DataFrame:
                 continue
             carbs = float(rng.uniform(20, 80))
             meal_min[m0] = carbs
-            _add_kernel(signal, m0, meal_gain * carbs * meal_amp_scale, meal_kernel)
+            _add_kernel(signal, m0, _CARB_PEAK_FRAC * carbs * csf, meal_kernel)
             if has_insulin:
-                dose = carbs / 10.0 * rng.uniform(0.8, 1.2)  # rough carb ratio
+                dose = carbs / icr * rng.uniform(0.85, 1.15)  # dosed by the user's ICR
                 insulin_min[m0] = dose
                 _add_kernel(
-                    signal, m0, dose * rng.uniform(2.5, 3.5), insulin_kernel, sign=-1.0
+                    signal, m0, _INS_PEAK_FRAC * dose * isf, insulin_kernel, sign=-1.0
                 )
         # activity bouts: steps + HR up, glucose dips
         for _ in range(rng.poisson(1.2)):
@@ -156,6 +168,9 @@ def _simulate_user(user_idx: int, cfg: Config) -> pd.DataFrame:
             "activity_flag": act_read,
             "hr": hr[read],
             "weather_temp": weather[read],
+            # per-user therapy settings (constant per user; from user_settings in real data)
+            "isf": isf,
+            "icr": icr,
         }
     )
 

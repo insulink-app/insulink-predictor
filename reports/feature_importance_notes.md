@@ -21,11 +21,26 @@ test split:
   add smaller but real contributions.
 - **Weather is low, as predicted:** `weather_now` sits at ~1.2% (rank ~10) —
   measured, not believed (§3).
+- **Therapy-scaled carbs help:** `cob_glucose` (COB × CSF, the expected mg/dL rise
+  still on board, using each user's ISF/ICR from `user_settings`) ranks ~4th
+  (~7%) — above raw `cob`. See the therapy A/B below.
 
 Note: the *global* importance of the hour features is modest because each user's
 circadian rhythm peaks at a different phase — a shared model can only capture the
 average. That residual per-user circadian structure is exactly what Phase 4's
 per-user models exploit (see `personalization_summary.csv`).
+
+## Therapy features (user_settings ISF/ICR) — A/B
+
+Wiring COB/IOB into glucose-equivalent mg/dL (`cob_glucose = cob·ISF/ICR`,
+`iob_glucose = iob·ISF`) gives a **small, consistent lift at 30 min**
+(~+0.005…+0.015 skill across seeds) and is roughly neutral at 60 min on the
+synthetic population (ISF 25–55, ICR 8–18). It is enabled by default
+(`features.use_therapy`) because it is physiologically principled and should help
+more on real data, where per-user sensitivity varies more widely. The raw ISF/ICR
+constants are per-user *identity*, so they live in **Phase-4 conditioning**
+(`user_isf`/`user_icr` static features), not the shared base — keeping the
+global-vs-personalized comparison clean.
 
 ## Takeaway
 

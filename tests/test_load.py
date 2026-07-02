@@ -71,14 +71,16 @@ def _sample_tables(n_glucose=180):
             "insulin_type": ["rapid", "rapid"],
         }
     )
-    sm = pd.DataFrame(
-        {
-            "user_id": uid,
-            "recorded_at": [base + i * 30 * _MIN_MS for i in range(6)],
-            "type": ["heart_rate", "steps", "heart_rate", "unknown_metric", "steps", "heart_rate"],
-            "value": [72.0, 400.0, 88.0, 1.0, 250.0, 95.0],
-        }
-    )
+    # Intraday HR + steps every 15 min (recognised as a stream), a daily WEIGHT
+    # aggregate (excluded by the cadence gate), and an unknown type (dropped).
+    hr_rows = [{"user_id": uid, "recorded_at": base + i * 15 * _MIN_MS, "type": "heart_rate",
+                "value": 70.0 + i} for i in range(12)]
+    step_rows = [{"user_id": uid, "recorded_at": base + i * 15 * _MIN_MS, "type": "STEPS",
+                  "value": 100.0 + i} for i in range(12)]
+    weight_rows = [{"user_id": uid, "recorded_at": base + d * 24 * 60 * _MIN_MS, "type": "WEIGHT",
+                    "value": 73.0} for d in range(3)]
+    unknown = [{"user_id": uid, "recorded_at": base, "type": "unknown_metric", "value": 1.0}]
+    sm = pd.DataFrame(hr_rows + step_rows + weight_rows + unknown)
     st = pd.DataFrame(
         {
             "user_id": uid,
@@ -88,7 +90,13 @@ def _sample_tables(n_glucose=180):
             "distance": [5000.0],
         }
     )
-    return {"glucose_entries": g, "bolus_entries": bolus, "sport_measurements": sm, "sport_trainings": st}
+    settings = pd.DataFrame(
+        [{"user_id": uid, "content": '{"bolus_correction_factor":"35","bolus_carb_factor":"15"}'}]
+    )
+    return {
+        "glucose_entries": g, "bolus_entries": bolus, "sport_measurements": sm,
+        "sport_trainings": st, "user_settings": settings,
+    }
 
 
 def test_assemble_raw_produces_contract_columns():
@@ -105,22 +113,47 @@ def test_assemble_raw_produces_contract_columns():
     assert raw["glucose_mgdl"].notna().sum() == 182
     assert (raw["carbs_g"] > 0).sum() == 2            # two meals
     assert raw["insulin_u"].notna().sum() == 2
-    assert raw["hr"].notna().sum() == 3               # 3 heart_rate rows
+    assert raw["hr"].notna().sum() == 12              # intraday HR stream mapped
+    assert raw["steps"].notna().sum() == 12           # intraday STEPS mapped
     assert raw["activity_flag"].sum() >= 1            # training expanded to buckets
-    # the unknown_metric type is dropped (not hr/steps)
-    assert raw["hr"].notna().sum() + raw["steps"].notna().sum() == 5
+    # ISF/ICR parsed from user_settings and attached per user
+    assert raw["isf"].iloc[0] == 35.0 and raw["icr"].iloc[0] == 15.0
+
+
+def test_daily_aggregate_steps_are_excluded():
+    """A daily STEPS total must NOT be mapped into the intraday steps channel."""
+    cfg = Config()
+    tables = _sample_tables()
+    uid = tables["glucose_entries"]["user_id"].iloc[0]
+    base = int(tables["glucose_entries"]["recorded_at"].iloc[0])
+    daily = pd.DataFrame(
+        [{"user_id": uid, "recorded_at": base + d * 24 * 60 * _MIN_MS, "type": "STEPS",
+          "value": 12000.0} for d in range(5)]
+    )
+    tables["sport_measurements"] = daily  # only daily-cadence STEPS
+    raw = assemble_raw(tables, cfg)
+    assert raw["steps"].notna().sum() == 0  # daily totals excluded, not dumped into a bucket
+
+
+def test_settings_parse():
+    from insulink_predictor.data.load import parse_settings
+
+    p = parse_settings('{"bolus_correction_factor":"35","bolus_carb_factor":"15"}')
+    assert p == {"isf": 35.0, "icr": 15.0}
+    assert parse_settings("not json") == {"isf": None, "icr": None}
 
 
 def test_assembled_raw_flows_through_align_and_schema():
     cfg = Config()
     raw = assemble_raw(_sample_tables(), cfg)
     grid = align(raw, cfg)  # validates against the pandera contract internally
-    # regular 5-min grid, carbs/insulin/hr survived the alignment
+    # regular 5-min grid, carbs/insulin survived the alignment; ISF/ICR carried
     diffs = grid["ts_utc"].diff().dropna().dt.total_seconds() / 60
     assert (diffs == cfg.grid_minutes).all()
     assert (grid["carbs_g"] > 0).sum() >= 2
     assert grid["insulin_u"].notna().sum() >= 2
     assert grid["activity_flag"].any()
+    assert (grid["isf"] == 35.0).all() and (grid["icr"] == 15.0).all()
 
 
 def test_empty_tables_yield_empty_raw():
@@ -130,4 +163,5 @@ def test_empty_tables_yield_empty_raw():
     assert list(raw.columns) == [
         "user_id", "ts_utc", "ts_local", "glucose_mgdl", "meal_flag",
         "carbs_g", "insulin_u", "steps", "activity_flag", "hr", "weather_temp",
+        "isf", "icr",
     ]

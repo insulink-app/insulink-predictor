@@ -25,6 +25,7 @@ unchanged.
 
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 import numpy as np
@@ -36,6 +37,7 @@ from ..config import Config, PostgresConfig
 RAW_COLUMNS = [
     "user_id", "ts_utc", "ts_local", "glucose_mgdl", "meal_flag",
     "carbs_g", "insulin_u", "steps", "activity_flag", "hr", "weather_temp",
+    "isf", "icr",
 ]
 
 # Heuristic type maps for sport_measurements (confirm against `gf db-inspect`).
@@ -76,6 +78,26 @@ def to_mgdl(values: pd.Series, source_unit: str) -> pd.Series:
     unit = detect_glucose_unit(values) if source_unit == "auto" else source_unit
     v = pd.to_numeric(values, errors="coerce")
     return v * MMOL_TO_MGDL if unit == "mmol/L" else v
+
+
+def _plausible_glucose(values: pd.Series) -> np.ndarray:
+    """NaN out non-physiological glucose (e.g. the 1.0 no-reading placeholder)."""
+    v = pd.to_numeric(values, errors="coerce").to_numpy(dtype=float)
+    return np.where((v >= 20.0) & (v <= 500.0), v, np.nan)
+
+
+def _is_intraday(ts, grid_minutes: int) -> bool:
+    """True if a measurement stream is intraday (not a daily/sparse aggregate).
+
+    Guards against mapping DAILY aggregates into the 5-min grid: in the real data
+    STEPS/DISTANCE/CALORIES arrive once per day (median gap ~24h), so a day-total
+    would otherwise be dumped into a single bucket and corrupt the steps features.
+    """
+    s = pd.Series(pd.to_datetime(ts, utc=True)).sort_values()
+    if len(s) < 3:
+        return False
+    med_gap_min = s.diff().dropna().dt.total_seconds().median() / 60.0
+    return med_gap_min <= max(60.0, grid_minutes * 6)
 
 
 def _expand_intervals(df: pd.DataFrame, grid_minutes: int, max_hours: int = 6) -> pd.DataFrame:
@@ -128,7 +150,7 @@ def assemble_raw(tables: dict[str, pd.DataFrame], cfg: Config) -> pd.DataFrame:
             _channel_block(
                 g["user_id"],
                 to_datetime_utc(g["recorded_at"], pg.ts_unit),
-                glucose_mgdl=to_mgdl(g["value"], pg.source_glucose_unit).to_numpy(),
+                glucose_mgdl=_plausible_glucose(to_mgdl(g["value"], pg.source_glucose_unit)),
             )
         )
 
@@ -138,29 +160,34 @@ def assemble_raw(tables: dict[str, pd.DataFrame], cfg: Config) -> pd.DataFrame:
     b = tables.get("bolus_entries")
     if b is not None and len(b):
         carbs = pd.to_numeric(b["carbohydrates"], errors="coerce").to_numpy()
-        smbg = to_mgdl(b["glucose"], pg.source_glucose_unit).to_numpy() if "glucose" in b else np.full(len(b), np.nan)
+        smbg = to_mgdl(b["glucose"], pg.source_glucose_unit) if "glucose" in b else pd.Series(np.full(len(b), np.nan))
         blocks.append(
             _channel_block(
                 b["user_id"],
                 to_datetime_utc(b["recorded_at"], pg.ts_unit),
-                glucose_mgdl=np.where(smbg > 0, smbg, np.nan),
+                glucose_mgdl=_plausible_glucose(smbg),  # drops no-reading placeholders (e.g. 1.0)
                 carbs_g=np.where(carbs > 0, carbs, np.nan),
                 insulin_u=pd.to_numeric(b["insulin"], errors="coerce").to_numpy(),
                 meal_flag=(carbs > 0),
             )
         )
 
-    # --- sport_measurements (hr / steps by type) ---------------------------
+    # --- sport_measurements (hr / steps by type, intraday only) ------------
+    # In the real schema this table is DAILY aggregates (STEPS/DISTANCE/CALORIES,
+    # one row/day) + sporadic WEIGHT — none are an intraday activity stream. The
+    # cadence gate below excludes daily aggregates so they don't corrupt the grid;
+    # only genuinely intraday hr/steps data (e.g. from a wearable) is mapped.
     sm = tables.get("sport_measurements")
     if sm is not None and len(sm):
         t = sm["type"].astype(str).str.lower()
         ts = to_datetime_utc(sm["recorded_at"], pg.ts_unit)
         val = pd.to_numeric(sm["value"], errors="coerce")
-        hr_mask, step_mask = t.isin(_HR_TYPES).to_numpy(), t.isin(_STEP_TYPES).to_numpy()
-        if hr_mask.any():
-            blocks.append(_channel_block(sm["user_id"].to_numpy()[hr_mask], ts[hr_mask], hr=val.to_numpy()[hr_mask]))
-        if step_mask.any():
-            blocks.append(_channel_block(sm["user_id"].to_numpy()[step_mask], ts[step_mask], steps=val.to_numpy()[step_mask]))
+        for channel, typeset in (("hr", _HR_TYPES), ("steps", _STEP_TYPES)):
+            mask = t.isin(typeset).to_numpy()
+            if mask.any() and _is_intraday(ts[mask], cfg.grid_minutes):
+                blocks.append(
+                    _channel_block(sm["user_id"].to_numpy()[mask], ts[mask], **{channel: val.to_numpy()[mask]})
+                )
 
     # --- activity windows (trainings + workouts) ---------------------------
     act_frames = []
@@ -195,7 +222,41 @@ def assemble_raw(tables: dict[str, pd.DataFrame], cfg: Config) -> pd.DataFrame:
     raw = pd.concat(blocks, ignore_index=True)
     raw = raw.dropna(subset=["ts_utc"])
     raw["ts_local"] = raw["ts_utc"].dt.tz_convert(pg.local_tz).dt.tz_localize(None)
+
+    # --- per-user therapy settings (ISF/ICR) from user_settings ------------
+    settings = _settings_table(tables.get("user_settings"), cfg)
+    raw = raw.merge(settings, on="user_id", how="left")
+    raw["isf"] = raw["isf"].fillna(cfg.features.default_isf)
+    raw["icr"] = raw["icr"].fillna(cfg.features.default_icr)
+
     return raw[RAW_COLUMNS].sort_values(["user_id", "ts_utc"]).reset_index(drop=True)
+
+
+def parse_settings(content) -> dict:
+    """Extract ISF/ICR from a user_settings.content JSON blob (robust to junk)."""
+    try:
+        c = json.loads(content) if isinstance(content, str) else (content or {})
+    except (ValueError, TypeError):
+        c = {}
+
+    def num(key):
+        try:
+            return float(c.get(key))
+        except (TypeError, ValueError):
+            return None
+
+    return {"isf": num("bolus_correction_factor"), "icr": num("bolus_carb_factor")}
+
+
+def _settings_table(us: Optional[pd.DataFrame], cfg: Config) -> pd.DataFrame:
+    """Per-user ISF/ICR frame from user_settings; empty frame if unavailable."""
+    if us is None or not len(us):
+        return pd.DataFrame(columns=["user_id", "isf", "icr"])
+    rows = []
+    for _, r in us.iterrows():
+        p = parse_settings(r.get("content"))
+        rows.append({"user_id": str(r["user_id"]), "isf": p["isf"], "icr": p["icr"]})
+    return pd.DataFrame(rows)
 
 
 # --------------------------------------------------------------------------- #
@@ -255,6 +316,12 @@ def fetch_tables(cfg: Config, engine=None, since=None, user_ids: Optional[list[s
         clause, params = where(time_col)
         sql = text(f"SELECT {cols} FROM {_q(pg.db_schema, name)}{clause}")
         out[name] = pd.read_sql(sql, engine, params=params)
+
+    # user_settings has no recorded_at → fetch per user (for ISF/ICR therapy features)
+    ucl = " WHERE user_id IN (SELECT id FROM %s WHERE compliant = true)" % _q(pg.db_schema, "users") if pg.only_compliant else ""
+    out["user_settings"] = pd.read_sql(
+        text(f"SELECT user_id, content FROM {_q(pg.db_schema, 'user_settings')}{ucl}"), engine
+    )
     return out
 
 

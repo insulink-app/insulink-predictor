@@ -116,4 +116,20 @@ def build_features(df: pd.DataFrame, cfg: Config) -> tuple[pd.DataFrame, list[st
         df["weather_now"] = df["weather_temp"]
         cols.append("weather_now")
 
+    # --- therapy-scaled features: COB/IOB in glucose-equivalent mg/dL --------
+    # ISF (mg/dL per U) and ICR (g per U) come from user_settings; CSF = ISF/ICR
+    # (mg/dL per g). These hand the model each user's sensitivity directly, so a
+    # global model no longer has to average over very different responders.
+    # Only the time-varying glucose-equivalent effects are added here. The raw
+    # ISF/ICR constants are user-identity and belong to personalization
+    # conditioning (Phase 4a), not the shared base feature set.
+    if fc.use_therapy and _has_channel(df, "isf") and _has_channel(df, "icr"):
+        csf = df["isf"] / df["icr"]
+        if "cob" in df.columns:
+            df["cob_glucose"] = df["cob"] * csf        # expected mg/dL rise still on board
+            cols.append("cob_glucose")
+        if "iob" in df.columns:
+            df["iob_glucose"] = df["iob"] * df["isf"]  # expected mg/dL drop still on board
+            cols.append("iob_glucose")
+
     return df, cols

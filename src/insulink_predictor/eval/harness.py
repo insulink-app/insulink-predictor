@@ -312,9 +312,9 @@ def per_user_skill(test: pd.DataFrame, cfg: Config, pred_fn: PredFn, model_name:
 def run_personalize_eval(cfg: Config, df: pd.DataFrame | None = None, write: bool = True) -> dict:
     """Phase 4 DoD: personalized beats global per-user; cold-start degrades gracefully."""
     from ..models.personalize import (
-        STATIC_COLS,
         PersonalizedModel,
         add_static,
+        static_cols,
         train_per_horizon,
         train_residuals,
         user_static_features,
@@ -327,12 +327,13 @@ def run_personalize_eval(cfg: Config, df: pd.DataFrame | None = None, write: boo
     # global (feature-only) baseline
     global_models = train_per_horizon(train, feature_cols, cfg)
 
-    # 4a conditioned + 4b residual
+    # 4a conditioned + 4b residual (ISF/ICR enter here, as user-static conditioning)
     static = user_static_features(train)
+    scols = static_cols(static)
     train_c = add_static(train, static)
-    cond_models = train_per_horizon(train_c, feature_cols + STATIC_COLS, cfg)
-    residual_models = train_residuals(train_c, cond_models, feature_cols, STATIC_COLS, cfg)
-    personalized = PersonalizedModel(cond_models, residual_models, feature_cols, STATIC_COLS, static)
+    cond_models = train_per_horizon(train_c, feature_cols + scols, cfg)
+    residual_models = train_residuals(train_c, cond_models, feature_cols, scols, cfg)
+    personalized = PersonalizedModel(cond_models, residual_models, feature_cols, scols, static)
 
     def global_pred(d, h):
         return global_models[h].predict(d[feature_cols])

@@ -44,17 +44,27 @@ def _small_regressor() -> LGBMRegressor:
 
 
 def user_static_features(train: pd.DataFrame) -> pd.DataFrame:
-    """Per-user summary stats from TRAIN only (no leakage): the 4a conditioning."""
+    """Per-user summary stats from TRAIN only (no leakage): the 4a conditioning.
+
+    Per-user therapy settings (ISF/ICR) are pure identity attributes, so this is
+    their proper home — conditioning the personalized model, not the shared base.
+    """
     rising = train["rate_short"].where(train["rate_short"] > 0)
     g = train.groupby("user_id")
-    stats = pd.DataFrame(
-        {
-            "user_mean_glucose": g["glucose_mgdl"].mean(),
-            "user_std_glucose": g["glucose_mgdl"].std(),
-            "user_typ_rise": rising.groupby(train["user_id"]).mean(),
-        }
-    )
-    return stats.reset_index()
+    cols = {
+        "user_mean_glucose": g["glucose_mgdl"].mean(),
+        "user_std_glucose": g["glucose_mgdl"].std(),
+        "user_typ_rise": rising.groupby(train["user_id"]).mean(),
+    }
+    for therapy in ("isf", "icr"):
+        if therapy in train.columns:
+            cols[f"user_{therapy}"] = g[therapy].first()  # distinct name: grid carries isf/icr too
+    return pd.DataFrame(cols).reset_index()
+
+
+def static_cols(static: pd.DataFrame) -> list[str]:
+    """The conditioning feature columns present in a static table."""
+    return [c for c in static.columns if c != "user_id"]
 
 
 def add_static(df: pd.DataFrame, static: pd.DataFrame) -> pd.DataFrame:

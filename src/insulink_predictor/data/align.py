@@ -75,6 +75,10 @@ def _align_user(sub: pd.DataFrame, cfg: Config) -> pd.DataFrame:
             "sensor_gap": sensor_gap.to_numpy(),
         }
     )
+    # Carry per-user therapy settings through unchanged (constant per user).
+    for col in ("isf", "icr"):
+        if col in sub.columns:
+            out[col] = sub[col].iloc[0]
     return out
 
 

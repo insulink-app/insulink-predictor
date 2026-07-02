@@ -16,6 +16,9 @@ wheels/
 # Experiment tracking
 /mlruns/
 
+# DB inspection dumps contain real user data samples — never commit
+reports/db_inspection.json
+
 # Secrets / local env (compose + app credentials)
 .env
 

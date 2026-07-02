@@ -44,6 +44,9 @@ GRID_SCHEMA = pa.DataFrameSchema(
         "activity_flag": pa.Column(bool, nullable=False, required=False),
         "hr": pa.Column(float, checks=pa.Check.ge(0), nullable=True, required=False),
         "weather_temp": pa.Column(float, nullable=True, required=False),
+        # per-user therapy settings (ISF/ICR); optional, carried for therapy features
+        "isf": pa.Column(float, checks=pa.Check.gt(0), nullable=True, required=False),
+        "icr": pa.Column(float, checks=pa.Check.gt(0), nullable=True, required=False),
         "sensor_gap": pa.Column(bool, nullable=False),
     },
     checks=pa.Check(

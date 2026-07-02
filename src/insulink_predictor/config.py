@@ -25,6 +25,11 @@ class FeatureConfig(BaseModel):
     use_weather: bool = True
     cob_tau_min: float = 45.0
     iob_tau_min: float = 55.0
+    # Therapy features: express COB/IOB in glucose-equivalent mg/dL using each
+    # user's ISF (correction factor) and ICR (carb ratio) from user_settings.
+    use_therapy: bool = True
+    default_isf: float = 40.0   # mg/dL per 1U, fallback when a user has no setting
+    default_icr: float = 12.0   # g carbs per 1U, fallback
 
 
 class EventConfig(BaseModel):
