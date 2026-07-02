@@ -19,7 +19,7 @@ from ..features.target import build_targets
 from ..models.baseline import persistence_predict
 from .error_grid import clarke_zone_pct, parkes_zone_pct, plot_parkes, unsafe_fraction
 from .metrics import mae, rmse, skill_score
-from .reporting import mlflow_run, plot_feature_importance, write_table
+from .reporting import mlflow_run, plot_curves, plot_feature_importance, write_table
 from .split import chronological_split
 
 PredFn = Callable[[pd.DataFrame, int], np.ndarray]
@@ -182,4 +182,105 @@ def run_lgbm_eval(cfg: Config, df: pd.DataFrame | None = None, write: bool = Tru
         "feature_cols": feature_cols,
         "test": test,
         "ref_rmse": ref,
+    }
+
+
+def subset_skill(test: pd.DataFrame, cfg: Config, pred_fn: PredFn, mask: np.ndarray) -> pd.DataFrame:
+    """Skill of a model vs persistence, restricted to ``mask`` rows.
+
+    Crucially the persistence denominator is recomputed **on the same subset** —
+    so post-event skill is measured against persistence's own post-event error.
+    """
+    rows = []
+    for h in cfg.horizons_steps:
+        valid = test[f"valid_{h}"].to_numpy() & mask
+        yt = test[f"y_{h}"].to_numpy()[valid]
+        yp = np.asarray(pred_fn(test, h))[valid]
+        r_model = rmse(yt, yp)
+        r_pers = rmse(yt, persistence_predict(test, h)[valid])
+        rows.append(
+            {
+                "horizon_min": h * cfg.grid_minutes,
+                "n": int(valid.sum()),
+                "rmse": round(r_model, 3),
+                "rmse_persistence": round(r_pers, 3),
+                "skill": round(skill_score(r_model, r_pers), 4),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _curve_examples(test: pd.DataFrame, curve_models, feature_cols, cfg, n: int = 3) -> list[dict]:
+    """Pick post-meal events with a fully-observed 60-min future; forecast the curve."""
+    from ..models.events import forecast_curve
+
+    max_step = max(cfg.horizons_steps)
+    ok = test["event_meal"].to_numpy() & test[f"cvalid_{max_step}"].to_numpy()
+    idx = np.flatnonzero(ok)
+    if idx.size == 0:
+        return []
+    picks = idx[np.linspace(0, idx.size - 1, num=min(n, idx.size)).astype(int)]
+    minutes = [k * cfg.grid_minutes for k in range(1, max_step + 1)]
+    examples = []
+    for j in picks:
+        row = test.iloc[[j]]
+        pred = forecast_curve(row, curve_models, feature_cols)[0]
+        actual = [float(test.iloc[j][f"cy_{k}"]) for k in range(1, max_step + 1)]
+        ts = pd.Timestamp(test.iloc[j]["ts_local"]).strftime("%a %H:%M")
+        examples.append(
+            {
+                "title": f"{test.iloc[j]['user_id']} · meal @ {ts}",
+                "g0": float(test.iloc[j]["glucose_mgdl"]),
+                "minutes": minutes,
+                "predicted": [float(x) for x in pred],
+                "actual": actual,
+            }
+        )
+    return examples
+
+
+def run_event_eval(cfg: Config, df: pd.DataFrame | None = None, write: bool = True) -> dict:
+    """Phase 3 DoD: post-meal skill must exceed the global skill; plot the curve."""
+    from ..models.events import build_curve_targets, detect_events, train_curve_models
+    from ..models.lgbm import make_pred_fn
+
+    sup, feature_cols = build_supervised(cfg, df)
+    max_step = max(cfg.horizons_steps)
+    sup = build_curve_targets(sup, max_step)
+    sup = detect_events(sup, cfg)
+
+    train, test = chronological_split(sup, cfg.split.test_fraction)
+    curve_models = train_curve_models(train, feature_cols, max_step)
+    pred_fn = make_pred_fn(curve_models, feature_cols)  # keyed by step; covers horizons
+
+    tsm = test["time_since_meal"].to_numpy()
+    post_meal = np.isfinite(tsm) & (tsm <= cfg.event.post_event_window_min)
+    global_mask = np.ones(len(test), dtype=bool)
+
+    g = subset_skill(test, cfg, pred_fn, global_mask)
+    g.insert(0, "window", "global")
+    p = subset_skill(test, cfg, pred_fn, post_meal)
+    p.insert(0, "window", "post_meal")
+    comparison = pd.concat([g, p], ignore_index=True)
+
+    examples = _curve_examples(test, curve_models, feature_cols, cfg)
+
+    if write:
+        reports = Path(cfg.paths.reports_dir)
+        write_table(comparison, reports / "event_skill.csv")
+        if examples:
+            plot_curves(examples, reports / "event_curves.png")
+        with mlflow_run(cfg, "events") as log:
+            log.params({"model": "lgbm-curve", "post_event_window_min": cfg.event.post_event_window_min})
+            for _, r in comparison.iterrows():
+                log.metrics({f"skill_{r['window']}_h{int(r['horizon_min'])}": r["skill"]})
+
+    return {
+        "comparison": comparison,
+        "global_skill": g,
+        "post_meal_skill": p,
+        "curve_models": curve_models,
+        "feature_cols": feature_cols,
+        "test": test,
+        "examples": examples,
     }

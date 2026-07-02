@@ -56,6 +56,37 @@ def plot_feature_importance(fi: pd.DataFrame, path: str | Path, top: int = 20) -
     return path
 
 
+def plot_curves(examples: list[dict], path: str | Path) -> Path:
+    """Plot predicted vs actual post-event trajectories.
+
+    Each example: ``{title, minutes, predicted, actual}`` (minutes/predicted/actual
+    are equal-length sequences over the forecast horizon).
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    n = max(1, len(examples))
+    fig, axes = plt.subplots(1, n, figsize=(4.2 * n, 3.6), squeeze=False)
+    for ax, ex in zip(axes[0], examples):
+        m = [0, *ex["minutes"]]
+        ax.plot(m, [ex["g0"], *ex["actual"]], "o-", color="#222", label="actual", ms=3)
+        ax.plot(m, [ex["g0"], *ex["predicted"]], "s--", color="#d8543b", label="forecast", ms=3)
+        ax.axhline(ex["g0"], color="#999", ls=":", lw=1, label="persistence")
+        ax.set_title(ex["title"], fontsize=9)
+        ax.set_xlabel("minutes ahead")
+        ax.set_ylabel("glucose (mg/dL)")
+        ax.legend(fontsize=7)
+    fig.suptitle("Event-triggered 60-min trajectory forecast", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+    return path
+
+
 @contextmanager
 def mlflow_run(cfg: Config, run_name: str):
     """Best-effort MLflow run. Yields a logger with no-op fallbacks."""

@@ -1,0 +1,5 @@
+window,horizon_min,n,rmse,rmse_persistence,skill
+global,30,6729,7.416,9.368,0.2084
+global,60,6658,11.249,13.32,0.1555
+post_meal,30,764,10.203,15.016,0.3206
+post_meal,60,766,12.859,18.332,0.2985

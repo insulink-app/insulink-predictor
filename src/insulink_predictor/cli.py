@@ -106,5 +106,35 @@ def _run_eval(config: Path) -> None:
     typer.echo(f"Reports + feature importance written to {cfg.paths.reports_dir}/")
 
 
+@app.command(name="train-events")
+def train_events_cmd(
+    config: Path = typer.Option(Path("config/config.yaml"), help="Path to config.yaml."),
+) -> None:
+    """Train the event-triggered curve models and evaluate post-event windows."""
+    _run_event_eval(config)
+
+
+@app.command(name="eval-events")
+def eval_events_cmd(
+    config: Path = typer.Option(Path("config/config.yaml"), help="Path to config.yaml."),
+) -> None:
+    """Evaluate post-meal skill vs global skill; plot 60-min trajectory forecasts."""
+    _run_event_eval(config)
+
+
+def _run_event_eval(config: Path) -> None:
+    from .eval.harness import run_event_eval
+
+    cfg = load_config(config)
+    res = run_event_eval(cfg, write=True)
+    typer.echo("Event-triggered skill (global vs post-meal):")
+    typer.echo(res["comparison"].to_string(index=False))
+    g = res["global_skill"].set_index("horizon_min")["skill"]
+    p = res["post_meal_skill"].set_index("horizon_min")["skill"]
+    verdict = "PASS" if all(p[h] > g[h] for h in g.index) else "FAIL"
+    typer.echo(f"\nPost-meal skill exceeds global skill? {verdict}")
+    typer.echo(f"Curve forecast plot -> {cfg.paths.reports_dir}/event_curves.png")
+
+
 if __name__ == "__main__":  # pragma: no cover
     app()
