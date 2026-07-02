@@ -194,6 +194,96 @@ def run_lgbm_eval(
     }
 
 
+def _score_with_grid(
+    test: pd.DataFrame, cfg: Config, pred_fn: PredFn, ref: dict[int, float]
+) -> pd.DataFrame:
+    """RMSE/MAE/skill (score_predictions) + Parkes safe/unsafe %, per horizon.
+
+    Merges accuracy and the clinical error grid so one row per horizon tells you
+    both "is it more accurate than persistence" and "is it clinically safe".
+    """
+    m = score_predictions(test, cfg, pred_fn, ref_rmse=ref)
+    zrows = []
+    for h in cfg.horizons_steps:
+        mask = test[f"valid_{h}"].to_numpy()
+        yt = test[f"y_{h}"].to_numpy()[mask]
+        yp = np.asarray(pred_fn(test, h))[mask]
+        pz = parkes_zone_pct(yt, yp)
+        zrows.append(
+            {
+                "horizon_min": h * cfg.grid_minutes,
+                "parkes_AB": round(pz["A"] + pz["B"], 2),
+                "parkes_unsafe_CDE": round(unsafe_fraction(pz), 3),
+            }
+        )
+    return m.merge(pd.DataFrame(zrows), on="horizon_min")
+
+
+def run_model_comparison(
+    cfg: Config, df: pd.DataFrame | None = None, k: int = 100, write: bool = True
+) -> dict:
+    """Head-to-head: persistence vs LGBM vs k-NN (plain + importance-weighted).
+
+    Everything is held fixed except the learner — same causal features, same
+    chronological split, same delta target, same persistence skill denominator —
+    so the table isolates *the learner's* contribution. k-NN is scored plain
+    (equal-weighted Euclidean metric) and importance-weighted (distance weighted
+    by LGBM's gain = a supervised metric), to show how much of k-NN's gap to LGBM
+    is just the missing feature selection trees do for free.
+    """
+    from ..models.knn import make_knn_pred_fn, train_knn
+    from ..models.lgbm import feature_importance, make_pred_fn, train_lgbm
+
+    sup, feature_cols = build_supervised(cfg, df)
+    train, test = chronological_split(sup, cfg.split.test_fraction)
+    ref = persistence_ref_rmse(test, cfg.horizons_steps)
+    delta = cfg.features.predict_delta
+
+    # LGBM — the reference learner; its gain-importances seed the supervised k-NN.
+    lgbm_models = train_lgbm(train, feature_cols, cfg)
+    lgbm_pred = make_pred_fn(lgbm_models, feature_cols, delta)
+    imp = feature_importance(lgbm_models, feature_cols).set_index("feature")["gain_pct"]
+
+    # k-NN — plain equal-weighted, then importance-weighted (same k).
+    knn_models = train_knn(train, feature_cols, cfg, k=k)
+    knn_pred = make_knn_pred_fn(knn_models, feature_cols, delta)
+    knn_w_models = train_knn(train, feature_cols, cfg, k=k, importances=imp)
+    knn_w_pred = make_knn_pred_fn(knn_w_models, feature_cols, delta)
+
+    specs: list[tuple[str, PredFn]] = [
+        ("persistence", persistence_predict),
+        ("lgbm", lgbm_pred),
+        (f"knn(k={k})", knn_pred),
+        (f"knn_wtd(k={k})", knn_w_pred),
+    ]
+    parts = []
+    for name, fn in specs:
+        row = _score_with_grid(test, cfg, fn, ref)
+        row.insert(0, "model", name)
+        parts.append(row)
+    comparison = pd.concat(parts, ignore_index=True)
+
+    # per-horizon winner by skill (persistence excluded — it is the yardstick).
+    winners = {}
+    contenders = comparison[comparison["model"] != "persistence"]
+    for h_min in sorted(comparison["horizon_min"].unique()):
+        sub = contenders[contenders["horizon_min"] == h_min]
+        winners[int(h_min)] = str(sub.loc[sub["skill"].idxmax(), "model"])
+
+    if write:
+        reports = Path(cfg.paths.reports_dir)
+        write_table(comparison, reports / "model_comparison_knn.csv")
+
+    return {
+        "comparison": comparison,
+        "winners": winners,
+        "k": k,
+        "feature_cols": feature_cols,
+        "test": test,
+        "ref_rmse": ref,
+    }
+
+
 def subset_skill(
     test: pd.DataFrame, cfg: Config, pred_fn: PredFn, mask: np.ndarray
 ) -> pd.DataFrame:
@@ -338,13 +428,17 @@ def run_curve(
     band=False,
     lo=0.1,
     hi=0.9,
+    model="lgbm",
+    knn_k=100,
 ) -> dict:
     """Train curve models on the early data and plot forecast trajectories.
 
     Forecasts are out-of-sample: the chronological tail (test split) is where the
     curves are drawn, after training on the earlier portion. With ``metrics``, also
     score the whole forecast window vs persistence at the horizon. With ``band``,
-    also train ``lo``/0.5/``hi`` quantile models and draw an uncertainty band.
+    draw an uncertainty band — LGBM trains ``lo``/0.5/``hi`` quantile models per
+    step; k-NN reads the band empirically off the neighbor set (no extra models).
+    ``model`` selects the per-step learner: ``"lgbm"`` (default) or ``"knn"``.
     """
     from ..models.events import (
         build_curve_targets,
@@ -369,16 +463,26 @@ def run_curve(
             "reason": "not enough data to train/forecast this range",
         }
 
-    curve_models = train_curve_models(
-        train, feature_cols, max_step, cfg.features.predict_delta
-    )
-    qmodels = (
-        train_quantile_curve_models(
-            train, feature_cols, max_step, (lo, 0.5, hi), cfg.features.predict_delta
+    if model == "knn":
+        from ..models.knn import quantile_knn_curve_models, train_knn_curve_models
+
+        curve_models = train_knn_curve_models(
+            train, feature_cols, max_step, cfg, k=knn_k
         )
-        if band
-        else None
-    )
+        qmodels = (
+            quantile_knn_curve_models(curve_models, (lo, 0.5, hi)) if band else None
+        )
+    else:
+        curve_models = train_curve_models(
+            train, feature_cols, max_step, cfg.features.predict_delta
+        )
+        qmodels = (
+            train_quantile_curve_models(
+                train, feature_cols, max_step, (lo, 0.5, hi), cfg.features.predict_delta
+            )
+            if band
+            else None
+        )
     examples = _curve_examples(
         test,
         curve_models,
@@ -390,10 +494,11 @@ def run_curve(
         qmodels=qmodels,
     )
 
+    suffix = "" if model == "lgbm" else f"_{model}"
     out = (
         Path(out)
         if out
-        else Path(cfg.paths.reports_dir) / f"curves_{horizon_min}min.png"
+        else Path(cfg.paths.reports_dir) / f"curves_{horizon_min}min{suffix}.png"
     )
     if examples:
         plot_curves(examples, out)

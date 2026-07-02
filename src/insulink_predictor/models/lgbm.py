@@ -34,27 +34,75 @@ def _monotone_vector(feature_cols: list[str]) -> list[int]:
     return [_MONOTONE_SIGNS.get(c, 0) for c in feature_cols]
 
 
+# Determinism/reproducibility flags shared by every LGBM we build.
+_BASE_PARAMS = dict(
+    subsample_freq=1,
+    random_state=_SEED,
+    n_jobs=1,  # deterministic
+    deterministic=True,
+    force_col_wise=True,
+    verbose=-1,
+)
+
+# Default (horizon-agnostic) config. Regularized to curb over-reaction on quiet
+# periods (real CGM is noisy). Used by the curve/quantile/personalize paths and
+# as the fallback for any horizon without a tuned config.
+_DEFAULT_PARAMS = dict(
+    n_estimators=350,
+    learning_rate=0.04,
+    num_leaves=16,
+    min_child_samples=120,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    reg_lambda=4.0,
+)
+
+# Per-horizon configs from an Optuna/TPE search (120 trials/horizon) on real
+# per-user data: chosen on a chronological validation slice, then confirmed by
+# 5-fold walk-forward (tuned beat the default at 60min in 5/5 folds, +0.013 mean
+# skill; at 30min in 4/5, +0.007). Both favour a slow learning rate with many
+# trees, but the horizons want genuinely different capacity. Tuned on a single
+# user's data — revisit when multi-user data lands.
+_TUNED_PARAMS: dict[int, dict] = {
+    30: dict(
+        n_estimators=480,
+        learning_rate=0.0079,
+        num_leaves=44,
+        min_child_samples=68,
+        min_child_weight=0.005,
+        reg_lambda=0.319,
+        reg_alpha=0.003,
+        subsample=0.79,
+        colsample_bytree=0.91,
+        max_depth=16,
+        min_split_gain=0.299,
+    ),
+    60: dict(
+        n_estimators=666,
+        learning_rate=0.0068,
+        num_leaves=218,
+        min_child_samples=47,
+        min_child_weight=0.456,
+        reg_lambda=0.009,
+        reg_alpha=32.448,
+        subsample=0.50,
+        colsample_bytree=0.93,
+        max_depth=6,
+        min_split_gain=0.144,
+    ),
+}
+
+
 def _make_regressor(
-    cfg: Config | None = None, feature_cols: list[str] | None = None
+    cfg: Config | None = None,
+    feature_cols: list[str] | None = None,
+    horizon_min: int | None = None,
 ) -> LGBMRegressor:
-    # Regularized to curb over-reaction on quiet periods (real CGM is noisy). This
-    # setting improves both the synthetic DoDs and real per-user skill vs the
-    # lighter default; see diagnostics in the per-user analysis.
-    reg = LGBMRegressor(
-        n_estimators=350,
-        learning_rate=0.04,
-        num_leaves=16,
-        min_child_samples=120,
-        subsample=0.8,
-        subsample_freq=1,
-        colsample_bytree=0.8,
-        reg_lambda=4.0,
-        random_state=_SEED,
-        n_jobs=1,  # deterministic
-        deterministic=True,
-        force_col_wise=True,
-        verbose=-1,
-    )
+    """Deterministic LGBM. Uses the per-horizon TPE-tuned config when
+    ``horizon_min`` has one (30/60); otherwise the regularized default. ``cfg``
+    overrides (huber objective, monotone therapy constraints) are layered on top."""
+    params = _TUNED_PARAMS.get(horizon_min, _DEFAULT_PARAMS)
+    reg = LGBMRegressor(**_BASE_PARAMS, **params)
     if cfg is not None:
         m = cfg.model
         if m.objective == "huber":
@@ -92,7 +140,7 @@ def train_lgbm(
             train.loc[mask, f"y_{h}"] - train.loc[mask, "glucose_mgdl"]
         ).to_numpy()
         y = excursion if delta else train.loc[mask, f"y_{h}"].to_numpy()
-        model = _make_regressor(cfg, feature_cols)
+        model = _make_regressor(cfg, feature_cols, h * cfg.grid_minutes)
         model.fit(X, y, sample_weight=_excursion_weight(excursion, cfg))
         models[h] = model
     return models
