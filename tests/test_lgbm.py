@@ -28,7 +28,13 @@ def test_lgbm_rmse_below_persistence(lgbm_result):
     assert (lg < pe).all()
 
 
-def test_current_glucose_dominates_and_weather_is_low(lgbm_result):
+def test_context_features_drive_delta_and_weather_is_not_top(lgbm_result):
+    # The model predicts the CHANGE over persistence, so context/dynamics features
+    # (time-since-meal, circadian, rate) drive it — not the absolute level.
     fi = lgbm_result["feature_importance"].set_index("feature")["gain_pct"]
-    assert fi["lag_0"] == fi.max()             # current glucose is the top feature
-    assert fi.get("weather_now", 0.0) < 5.0    # weather is a minor feature (§3)
+    drivers = {
+        "time_since_meal", "time_since_activity", "rate_short", "rate_long",
+        "hour_sin", "hour_cos", "roll30_max", "roll60_max", "cob_glucose", "accel",
+    }
+    assert fi.index[0] in drivers, f"top feature {fi.index[0]} not an expected driver"
+    assert "weather_now" not in set(fi.index[:3])  # measured, not believed (§3)

@@ -31,6 +31,12 @@ class FeatureConfig(BaseModel):
     default_isf: float = 40.0   # mg/dL per 1U, fallback when a user has no setting
     default_icr: float = 12.0   # g carbs per 1U, fallback
 
+    # Model the CHANGE over persistence (target = y_{t+h} − g_t) instead of the
+    # absolute level. The regularized learner shrinks the delta toward ~0 when
+    # there's no signal, so quiet periods fall back to persistence instead of
+    # adding noise; deviations are reserved for real excursions.
+    predict_delta: bool = True
+
 
 class EventConfig(BaseModel):
     meal_trigger: bool = True

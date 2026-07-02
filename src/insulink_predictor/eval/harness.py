@@ -149,7 +149,7 @@ def run_lgbm_eval(cfg: Config, df: pd.DataFrame | None = None, write: bool = Tru
     train, test = chronological_split(sup, cfg.split.test_fraction)
 
     models = train_lgbm(train, feature_cols, cfg)
-    pred_fn = make_pred_fn(models, feature_cols)
+    pred_fn = make_pred_fn(models, feature_cols, cfg.features.predict_delta)
 
     ref = persistence_ref_rmse(test, cfg.horizons_steps)
     lgbm_m = score_predictions(test, cfg, pred_fn, ref_rmse=ref)
@@ -241,7 +241,7 @@ def _curve_examples(test, curve_models, feature_cols, cfg, max_step=None, n=3, a
     examples = []
     for j in picks:
         row = test.iloc[[j]]
-        pred = forecast_curve(row, curve_models, feature_cols)[0][:max_step]
+        pred = forecast_curve(row, curve_models, feature_cols, cfg.features.predict_delta)[0][:max_step]
         actual = [float(test.iloc[j][f"cy_{k}"]) for k in range(1, max_step + 1)]
         ts = pd.Timestamp(test.iloc[j]["ts_local"]).strftime("%a %d.%m %H:%M")
         tag = "meal" if bool(test.iloc[j].get("event_meal", False)) else "t"
@@ -266,7 +266,7 @@ def _curve_metrics(test, cfg, curve_models, feature_cols, max_step) -> pd.DataFr
     """
     from ..models.events import forecast_curve
 
-    yhat = forecast_curve(test, curve_models, feature_cols)[:, max_step - 1]
+    yhat = forecast_curve(test, curve_models, feature_cols, cfg.features.predict_delta)[:, max_step - 1]
     yt = test[f"cy_{max_step}"].to_numpy()
     g_t = test["glucose_mgdl"].to_numpy()  # persistence prediction
     valid = test[f"cvalid_{max_step}"].to_numpy()
@@ -311,7 +311,7 @@ def run_curve(cfg, df=None, horizon_min=60, n=3, at=None, out=None, metrics=Fals
         return {"examples": [], "n_train": len(train), "n_test": len(test), "out": None,
                 "metrics": None, "reason": "not enough data to train/forecast this range"}
 
-    curve_models = train_curve_models(train, feature_cols, max_step)
+    curve_models = train_curve_models(train, feature_cols, max_step, cfg.features.predict_delta)
     examples = _curve_examples(test, curve_models, feature_cols, cfg, max_step=max_step, n=n, at=at)
 
     out = Path(out) if out else Path(cfg.paths.reports_dir) / f"curves_{horizon_min}min.png"
@@ -333,8 +333,8 @@ def run_event_eval(cfg: Config, df: pd.DataFrame | None = None, write: bool = Tr
     sup = detect_events(sup, cfg)
 
     train, test = chronological_split(sup, cfg.split.test_fraction)
-    curve_models = train_curve_models(train, feature_cols, max_step)
-    pred_fn = make_pred_fn(curve_models, feature_cols)  # keyed by step; covers horizons
+    curve_models = train_curve_models(train, feature_cols, max_step, cfg.features.predict_delta)
+    pred_fn = make_pred_fn(curve_models, feature_cols, cfg.features.predict_delta)  # keyed by step
 
     tsm = test["time_since_meal"].to_numpy()
     post_meal = np.isfinite(tsm) & (tsm <= cfg.event.post_event_window_min)
@@ -416,10 +416,12 @@ def run_personalize_eval(cfg: Config, df: pd.DataFrame | None = None, write: boo
     train_c = add_static(train, static)
     cond_models = train_per_horizon(train_c, feature_cols + scols, cfg)
     residual_models = train_residuals(train_c, cond_models, feature_cols, scols, cfg)
-    personalized = PersonalizedModel(cond_models, residual_models, feature_cols, scols, static)
+    personalized = PersonalizedModel(cond_models, residual_models, feature_cols, scols, static,
+                                     predict_delta=cfg.features.predict_delta)
 
     def global_pred(d, h):
-        return global_models[h].predict(d[feature_cols])
+        pred = global_models[h].predict(d[feature_cols])
+        return pred + d["glucose_mgdl"].to_numpy() if cfg.features.predict_delta else pred
 
     gu = per_user_skill(test, cfg, global_pred, "global")
     pu = per_user_skill(test, cfg, personalized.predict, "personalized")

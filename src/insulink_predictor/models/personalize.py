@@ -73,22 +73,28 @@ def add_static(df: pd.DataFrame, static: pd.DataFrame) -> pd.DataFrame:
 
 
 def train_per_horizon(train: pd.DataFrame, cols: list[str], cfg: Config) -> dict[int, LGBMRegressor]:
+    delta = cfg.features.predict_delta
     models: dict[int, LGBMRegressor] = {}
     for h in cfg.horizons_steps:
         mask = train[f"valid_{h}"].to_numpy()
-        models[h] = _make_regressor().fit(train.loc[mask, cols], train.loc[mask, f"y_{h}"])
+        y = train.loc[mask, f"y_{h}"]
+        if delta:
+            y = y - train.loc[mask, "glucose_mgdl"]
+        models[h] = _make_regressor().fit(train.loc[mask, cols], y)
     return models
 
 
 class PersonalizedModel:
     """Conditioned global base (4a) + per-user residual models (4b)."""
 
-    def __init__(self, cond_models, residual_models, feature_cols, static_cols, static_table):
+    def __init__(self, cond_models, residual_models, feature_cols, static_cols, static_table,
+                 predict_delta: bool = True):
         self.cond_models = cond_models
         self.residual_models = residual_models  # {h: {user_id: model}}
         self.feature_cols = feature_cols
         self.static_cols = static_cols
         self.static_table = static_table
+        self.predict_delta = predict_delta
 
     def predict(self, df: pd.DataFrame, horizon_steps: int) -> np.ndarray:
         d = df.reset_index(drop=True)
@@ -96,7 +102,9 @@ class PersonalizedModel:
         base = self.cond_models[horizon_steps].predict(
             merged[self.feature_cols + self.static_cols]
         ).astype(float)
-        # add the per-user residual where a model exists; cold-start users → +0
+        if self.predict_delta:
+            base = base + d["glucose_mgdl"].to_numpy()  # delta → absolute
+        # add the per-user (absolute) residual where a model exists; cold-start → +0
         for uid, rmodel in self.residual_models.get(horizon_steps, {}).items():
             m = (d["user_id"] == uid).to_numpy()
             if m.any():
@@ -106,10 +114,13 @@ class PersonalizedModel:
 
 def train_residuals(train_c, cond_models, feature_cols, static_cols, cfg) -> dict:
     """Fit a tiny residual model per (horizon, user) on that user's train residuals."""
+    delta = cfg.features.predict_delta
     residual_models: dict[int, dict] = {}
     for h in cfg.horizons_steps:
         base = cond_models[h].predict(train_c[feature_cols + static_cols]).astype(float)
-        tc = train_c.assign(_base=base, _resid=train_c[f"y_{h}"] - base)
+        if delta:
+            base = base + train_c["glucose_mgdl"].to_numpy()  # absolute base
+        tc = train_c.assign(_resid=train_c[f"y_{h}"] - base)  # residual is absolute
         residual_models[h] = {}
         for uid, gdf in tc.groupby("user_id"):
             valid = gdf[f"valid_{h}"].to_numpy()

@@ -48,17 +48,31 @@ def build_curve_targets(df: pd.DataFrame, max_step: int) -> pd.DataFrame:
     return df
 
 
-def train_curve_models(train: pd.DataFrame, feature_cols: list[str], max_step: int) -> dict[int, object]:
-    """Train one LightGBM per step ``1..max_step`` on valid rows."""
+def train_curve_models(
+    train: pd.DataFrame, feature_cols: list[str], max_step: int, predict_delta: bool = True
+) -> dict[int, object]:
+    """Train one LightGBM per step ``1..max_step`` on valid rows.
+
+    With ``predict_delta`` each step's target is the change over persistence
+    (cy_k − g_t), added back in ``forecast_curve``.
+    """
     models: dict[int, object] = {}
     for k in range(1, max_step + 1):
         mask = train[f"cvalid_{k}"].to_numpy()
-        models[k] = _make_regressor().fit(train.loc[mask, feature_cols], train.loc[mask, f"cy_{k}"])
+        y = train.loc[mask, f"cy_{k}"]
+        if predict_delta:
+            y = y - train.loc[mask, "glucose_mgdl"]
+        models[k] = _make_regressor().fit(train.loc[mask, feature_cols], y)
     return models
 
 
-def forecast_curve(df: pd.DataFrame, models: dict[int, object], feature_cols: list[str]) -> np.ndarray:
-    """Return the predicted trajectory, shape ``(n_rows, max_step)``."""
+def forecast_curve(
+    df: pd.DataFrame, models: dict[int, object], feature_cols: list[str], predict_delta: bool = True
+) -> np.ndarray:
+    """Return the predicted trajectory in absolute mg/dL, shape ``(n_rows, max_step)``."""
     X = df[feature_cols]
     steps = sorted(models)
-    return np.column_stack([models[k].predict(X) for k in steps])
+    preds = np.column_stack([models[k].predict(X) for k in steps])
+    if predict_delta:
+        preds = preds + df["glucose_mgdl"].to_numpy()[:, None]
+    return preds
