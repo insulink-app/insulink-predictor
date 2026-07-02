@@ -35,11 +35,77 @@ class FeatureConfig(BaseModel):
     default_isf: float = 40.0  # mg/dL per 1U, fallback when a user has no setting
     default_icr: float = 12.0  # g carbs per 1U, fallback
 
+    # Per-user circadian baseline: the causal (past-only) expanding mean glucose at
+    # this user's local time-of-day bin, plus the current deviation from it. The
+    # shared hour_sin/cos can only fit the *average* circadian phase; each user
+    # peaks at a different hour, so that structure averages out globally (see
+    # feature_importance_notes). This hands the global model each user's own
+    # time-of-day norm — the per-user circadian moat, available before any
+    # per-user model exists.
+    #
+    # OFF by default: lifts synth skill (+0.008 @30, 5/5 folds) but slightly HURTS
+    # the real single-user data (−0.004, 2/5 folds) — synth's clean sinusoidal
+    # per-user circadian doesn't match one noisy real user. Re-test with
+    # `gf backtest --source db` on a multi-user real set before enabling.
+    use_tod_baseline: bool = False
+    tod_bin_min: int = 30  # width of the time-of-day bin (minutes)
+
+    # Horizon-specific physiological forecast: the expected glucose *change* over
+    # the next h minutes from carbs/insulin already on board, obtained by
+    # forward-integrating a bi-exponential response kernel over currently-known
+    # doses (strictly causal — only past doses enter). Unlike cob/iob (stock now)
+    # and *_activity (rate now), this speaks the delta target's language directly:
+    # "how much rise/drop is still coming in the next 30/60 min." Emitted as shared
+    # columns carb_delta_<h>/ins_delta_<h> for every horizon; both horizon models
+    # see all of them (the tree picks the relevant lead).
+    #
+    # OFF by default: top feature and biggest post-meal lift on synth (+0.005…),
+    # but slightly HURTS the real single-user data (−0.005 @60, 0–1/5 folds) — the
+    # fixed bi-exp kernel matches synth's generator but not real absorption. Fit the
+    # kernel to real data (or learn the response) before enabling.
+    use_physio_delta: bool = False
+    carb_resp_rise_min: float = 20.0
+    carb_resp_decay_min: float = 90.0
+    ins_resp_rise_min: float = 20.0
+    ins_resp_decay_min: float = 70.0
+
     # Model the CHANGE over persistence (target = y_{t+h} − g_t) instead of the
     # absolute level. The regularized learner shrinks the delta toward ~0 when
     # there's no signal, so quiet periods fall back to persistence instead of
     # adding noise; deviations are reserved for real excursions.
     predict_delta: bool = True
+
+
+class ModelConfig(BaseModel):
+    """Learner-side knobs, A/B-able through walk-forward backtesting.
+
+    All default to *off*, so the committed defaults reproduce the Phase-2 model.
+    Paired walk-forward comparison on the synthetic population showed **no lift**
+    for any of these (excursion-weighting actively hurt — the delta target already
+    handles excursions and up-weighting them causes over-reaction), so they stay
+    off. They are kept as ready-to-retest levers for **real** data, where the noise
+    and robustness trade-offs differ (huber/monotone are safety-oriented). Re-run
+    ``gf backtest`` on real data before enabling any of them.
+    """
+
+    # Emphasize excursion rows in training. Skill is RMSE-based and persistence
+    # RMSE is dominated by large post-meal/activity swings, so winning those rows
+    # disproportionately raises skill. weight = 1 + alpha·min(|Δ|/scale, cap),
+    # Δ = y_{t+h} − g_t. alpha=0 disables; scale = std(Δ) on the training rows.
+    excursion_weight_alpha: float = 0.0
+    excursion_weight_cap: float = 3.0
+
+    # Physiologically-signed monotone constraints on the therapy channels (with the
+    # delta target): more carbs-on-board can only raise the forecast, more
+    # insulin-on-board can only lower it. Curbs over-fitting on excursions and is a
+    # safety property for the error grid.
+    use_monotone: bool = False
+
+    # Point-forecast objective. "huber" is robust to CGM artifacts (calibration
+    # jumps, compression lows) but discounts the large excursions skill rewards —
+    # so it is a genuine trade-off, decided by backtest, not assumed.
+    objective: str = "l2"  # l2 | huber
+    huber_delta: float = 8.0  # mg/dL; residual scale where huber turns linear
 
 
 class EventConfig(BaseModel):
@@ -126,6 +192,7 @@ class Config(BaseSettings):
     max_interp_gap_min: int = 15
 
     features: FeatureConfig = FeatureConfig()
+    model: ModelConfig = ModelConfig()
     event: EventConfig = EventConfig()
     synth: SynthConfig = SynthConfig()
     split: SplitConfig = SplitConfig()

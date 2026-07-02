@@ -46,6 +46,26 @@ def _decay_accumulate(
     )
 
 
+def _biexp_response(
+    rise_min: float, decay_min: float, grid_min: int, length_min: int = 240
+) -> np.ndarray:
+    """Bi-exponential glucose response kernel (level), peak normalized to 1.0."""
+    t = np.arange(0, length_min, grid_min)
+    k = np.exp(-t / decay_min) - np.exp(-t / rise_min)
+    peak = k.max()
+    return k / peak if peak > 0 else k
+
+
+def _causal_conv(df: pd.DataFrame, col: str, kernel: np.ndarray) -> pd.Series:
+    """Causal convolution of a per-bucket dose series with ``kernel`` (past doses)."""
+    x = df[col].fillna(0.0)
+    if kernel.size == 0:
+        return pd.Series(np.zeros(len(df)), index=df.index)
+    return x.groupby(df["user_id"], sort=False).transform(
+        lambda s: pd.Series(np.convolve(s.to_numpy(), kernel)[: len(s)], index=s.index)
+    )
+
+
 def _activity(
     df: pd.DataFrame, col: str, tau_min: float, grid_min: int, length_min: int = 360
 ) -> pd.Series:
@@ -113,6 +133,44 @@ def build_features(df: pd.DataFrame, cfg: Config) -> tuple[pd.DataFrame, list[st
     df["is_weekend"] = (df["ts_local"].dt.dayofweek >= 5).astype(int)
     df["day_of_week"] = df["ts_local"].dt.dayofweek
     cols += ["hour_sin", "hour_cos", "is_weekend", "day_of_week"]
+
+    # --- per-user circadian baseline (causal, past-only) --------------------
+    # Expanding mean glucose at this user's local time-of-day bin, using only
+    # earlier rows (shift(1)), plus the current deviation from it. Captures the
+    # per-user circadian phase that shared hour_sin/cos cannot (it averages out
+    # across users). Strictly causal: a future value never enters a past bin mean.
+    if fc.use_tod_baseline:
+        bin_min = max(1, fc.tod_bin_min)
+        df["_tod_bin"] = (
+            df["ts_local"].dt.hour * 60 + df["ts_local"].dt.minute
+        ) // bin_min
+        base = df.groupby(["user_id", "_tod_bin"], sort=False)[
+            "glucose_mgdl"
+        ].transform(lambda s: s.expanding().mean().shift(1))
+        df["tod_baseline"] = base
+        df["tod_dev"] = df["glucose_mgdl"] - base
+        df.drop(columns="_tod_bin", inplace=True)
+        cols += ["tod_baseline", "tod_dev"]
+
+    # --- horizon-specific physiological forecast (causal) -------------------
+    # Expected glucose change over the next h steps from doses already on board:
+    # conv(dose, kernel[h:]) − conv(dose, kernel) = effect at t+h minus effect now,
+    # both using only past doses. Directly estimates the delta target's meal/insulin
+    # component, per horizon.
+    if fc.use_physio_delta:
+        specs = [
+            ("carbs_g", fc.carb_resp_rise_min, fc.carb_resp_decay_min, +1.0, "carb"),
+            ("insulin_u", fc.ins_resp_rise_min, fc.ins_resp_decay_min, -1.0, "ins"),
+        ]
+        for col, rise, decay, sign, tag in specs:
+            if not _has_channel(df, col):
+                continue
+            k = _biexp_response(rise, decay, grid)
+            now = _causal_conv(df, col, k)
+            for h in cfg.horizons_steps:
+                name = f"{tag}_delta_{h}"
+                df[name] = sign * (_causal_conv(df, col, k[h:]) - now)
+                cols.append(name)
 
     # --- activity / steps (trailing sums) -----------------------------------
     gs = df.groupby("user_id", sort=False)["steps"]

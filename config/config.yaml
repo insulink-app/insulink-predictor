@@ -16,6 +16,24 @@ features:
   use_weather: true        # expected low importance — measured, not believed (§3)
   cob_tau_min: 45.0        # carbs-on-board exponential decay
   iob_tau_min: 55.0        # insulin-on-board exponential decay
+  # Per-user circadian baseline (causal). Helps on synth (+0.008 @30) but slightly
+  # HURTS real single-user data (−0.004) — off until validated on multi-user real
+  # data via `gf backtest --source db`.
+  use_tod_baseline: false
+  tod_bin_min: 30
+  # Horizon-specific physiological forecast (forward-integrated response kernel).
+  # Top feature on synth but slightly HURTS real data (fixed kernel ≠ real
+  # absorption) — off until the kernel is fit to real data.
+  use_physio_delta: false
+
+# Learner-side knobs. All off by default — a paired walk-forward comparison showed
+# NO synth lift (excursion-weighting actively hurt: the delta target already
+# handles excursions). Kept as ready-to-retest levers for real data. See
+# reports/backtest_notes.md; re-run `gf backtest` before enabling any.
+model:
+  excursion_weight_alpha: 0.0   # >0 up-weights large |Δ| rows (rejected on synth)
+  use_monotone: false           # physiological sign constraints on COB/IOB channels
+  objective: l2                 # l2 | huber (huber = robust but discounts excursions)
 
 event:
   meal_trigger: true
