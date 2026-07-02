@@ -245,9 +245,10 @@ def _curve_examples(test, curve_models, feature_cols, cfg, max_step=None, n=3, a
         actual = [float(test.iloc[j][f"cy_{k}"]) for k in range(1, max_step + 1)]
         ts = pd.Timestamp(test.iloc[j]["ts_local"]).strftime("%a %d.%m %H:%M")
         tag = "meal" if bool(test.iloc[j].get("event_meal", False)) else "t"
+        uid_short = str(test.iloc[j]["user_id"])[:8]  # keep titles short so they don't overlap
         examples.append(
             {
-                "title": f"{test.iloc[j]['user_id']} · {tag} @ {ts}",
+                "title": f"{uid_short}… · {tag} @ {ts}",
                 "g0": float(test.iloc[j]["glucose_mgdl"]),
                 "minutes": minutes,
                 "predicted": [float(x) for x in pred],
