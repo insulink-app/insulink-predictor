@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from glucose_forecast.config import Config, load_config
+from insulink_predictor.config import Config, load_config
 
 
 @pytest.fixture(scope="session")
@@ -15,14 +15,14 @@ def cfg() -> Config:
 
 @pytest.fixture(scope="session")
 def raw(cfg: Config):
-    from glucose_forecast.data.synth import generate
+    from insulink_predictor.data.synth import generate
 
     return generate(cfg)
 
 
 @pytest.fixture(scope="session")
 def grid(cfg: Config, raw):
-    from glucose_forecast.data.align import align
+    from insulink_predictor.data.align import align
 
     return align(raw, cfg)
 

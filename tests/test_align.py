@@ -5,13 +5,15 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from glucose_forecast.config import Config
-from glucose_forecast.data.align import align
+from insulink_predictor.config import Config
+from insulink_predictor.data.align import align
 
 
 def _raw_at_minutes(minutes: list[int]) -> pd.DataFrame:
     """Build a raw frame at exact grid minutes with glucose = 100 + minute."""
-    ts = pd.Timestamp("2025-01-06 00:00:00", tz="UTC") + pd.to_timedelta(minutes, unit="min")
+    ts = pd.Timestamp("2025-01-06 00:00:00", tz="UTC") + pd.to_timedelta(
+        minutes, unit="min"
+    )
     n = len(minutes)
     return pd.DataFrame(
         {

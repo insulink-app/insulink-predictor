@@ -5,7 +5,7 @@ from __future__ import annotations
 import pandera.errors
 import pytest
 
-from glucose_forecast.data.schema import validate
+from insulink_predictor.data.schema import validate
 
 
 def test_valid_grid_passes(grid):

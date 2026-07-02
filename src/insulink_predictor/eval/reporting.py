@@ -36,6 +36,26 @@ def write_table(df: pd.DataFrame, path: str | Path) -> Path:
     return path
 
 
+def plot_feature_importance(fi: pd.DataFrame, path: str | Path, top: int = 20) -> Path:
+    """Horizontal bar chart of the top-N features by gain%."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    top_fi = fi.head(top).iloc[::-1]  # largest at the top of the chart
+    fig, ax = plt.subplots(figsize=(7, max(3, 0.35 * len(top_fi))))
+    ax.barh(top_fi["feature"], top_fi["gain_pct"], color="#3b7dd8")
+    ax.set_xlabel("gain importance (%)")
+    ax.set_title("LightGBM feature importance (mean across horizons)")
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+    return path
+
+
 @contextmanager
 def mlflow_run(cfg: Config, run_name: str):
     """Best-effort MLflow run. Yields a logger with no-op fallbacks."""
@@ -60,7 +80,9 @@ def mlflow_run(cfg: Config, run_name: str):
             try:
                 import mlflow
 
-                mlflow.log_metrics({k: float(v) for k, v in metrics.items() if v is not None})
+                mlflow.log_metrics(
+                    {k: float(v) for k, v in metrics.items() if v is not None}
+                )
             except Exception:
                 self.active = False
 

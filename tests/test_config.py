@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from glucose_forecast.config import Config, load_config
+from insulink_predictor.config import Config, load_config
 
 
 def test_yaml_loads_and_defaults():

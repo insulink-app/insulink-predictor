@@ -31,7 +31,9 @@ def _clean_pair(y_true, y_pred):
     return yt[m], yp[m]
 
 
-def parkes_zone_pct(y_true, y_pred, diabetes_type: int = 2, unit: str = "mgdl") -> dict[str, float]:
+def parkes_zone_pct(
+    y_true, y_pred, diabetes_type: int = 2, unit: str = "mgdl"
+) -> dict[str, float]:
     """Percent of points in each Parkes zone A–E."""
     yt, yp = _clean_pair(y_true, y_pred)
     try:
@@ -56,7 +58,9 @@ def unsafe_fraction(zone_pct: dict[str, float]) -> float:
     return round(sum(zone_pct.get(z, 0.0) for z in ("C", "D", "E")), 3)
 
 
-def plot_parkes(y_true, y_pred, path: str | Path, diabetes_type: int = 2, unit: str = "mgdl") -> Path:
+def plot_parkes(
+    y_true, y_pred, path: str | Path, diabetes_type: int = 2, unit: str = "mgdl"
+) -> Path:
     """Render a Parkes error-grid scatter to ``path``."""
     import matplotlib
 

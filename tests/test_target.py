@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from glucose_forecast.features.target import build_targets
+from insulink_predictor.features.target import build_targets
 
 
 def _toy(n_per_user=6):
@@ -17,7 +17,7 @@ def _toy(n_per_user=6):
                 {
                     "user_id": uid,
                     "ts_utc": base + pd.Timedelta(minutes=5 * i),
-                    "glucose_mgdl": offset + i,      # strictly increasing per user
+                    "glucose_mgdl": offset + i,  # strictly increasing per user
                     "sensor_gap": False,
                 }
             )

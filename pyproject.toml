@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [project.scripts]
-gf = "glucose_forecast.cli:app"
+gf = "insulink_predictor.cli:app"
 
 [dependency-groups]
 dev = [
@@ -36,10 +36,10 @@ requires = ["uv_build>=0.9.3,<0.10.0"]
 build-backend = "uv_build"
 
 # Distribution is named "insulink-predictor", but the ROADMAP (§2) mandates the
-# importable package + CLI live under `glucose_forecast`. Pin the module name so
+# importable package + CLI live under `insulink_predictor`. Pin the module name so
 # both hold.
 [tool.uv.build-backend]
-module-name = "glucose_forecast"
+module-name = "insulink_predictor"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

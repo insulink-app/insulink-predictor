@@ -4,13 +4,21 @@ from __future__ import annotations
 
 import pandas as pd
 
-from glucose_forecast.config import Config
-from glucose_forecast.data.synth import generate
+from insulink_predictor.config import Config
+from insulink_predictor.data.synth import generate
 
 _REQUIRED = {
-    "user_id", "ts_utc", "ts_local", "glucose_mgdl",
-    "meal_flag", "carbs_g", "insulin_u", "steps",
-    "activity_flag", "hr", "weather_temp",
+    "user_id",
+    "ts_utc",
+    "ts_local",
+    "glucose_mgdl",
+    "meal_flag",
+    "carbs_g",
+    "insulin_u",
+    "steps",
+    "activity_flag",
+    "hr",
+    "weather_temp",
 }
 
 

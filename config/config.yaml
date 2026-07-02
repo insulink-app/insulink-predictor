@@ -42,5 +42,5 @@ paths:
 
 mlflow:
   tracking_uri: "file:./mlruns"
-  experiment: glucose-forecast
+  experiment: insulink-predictor
   enabled: true

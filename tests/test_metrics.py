@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from glucose_forecast.eval.metrics import mae, rmse, skill_score
+from insulink_predictor.eval.metrics import mae, rmse, skill_score
 
 
 def test_rmse_zero_when_perfect():

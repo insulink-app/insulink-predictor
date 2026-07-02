@@ -41,14 +41,14 @@
 ## 2. Repo-Struktur (Phase 0 legt das an)
 
 ```
-glucose-forecast/
+insulink-predictor/
 ├── README.md
 ├── ROADMAP.md                 # dieses Dokument
 ├── pyproject.toml             # uv
 ├── config/
 │   └── config.yaml            # Horizonte, Grid-Auflösung, Feature-Flags
 ├── data/                      # gitignored (raw/interim/processed)
-├── src/glucose_forecast/
+├── src/insulink_predictor/
 │   ├── config.py              # pydantic Settings
 │   ├── data/
 │   │   ├── schema.py          # pandera Data Contract

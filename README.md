@@ -36,7 +36,7 @@ uv run pytest
 
 ```
 config/config.yaml              # units, grid, horizons, feature flags (single source of truth)
-src/glucose_forecast/
+src/insulink_predictor/
   config.py                     # typed config (pydantic-settings + YAML)
   data/{schema,synth,align,load} # contract, generator, regular-grid alignment, real loader (stub)
   features/                     # strictly-causal feature builder (Phase 2)

@@ -5,8 +5,8 @@ from __future__ import annotations
 import ast
 import inspect
 
-import glucose_forecast.eval.split as split_mod
-from glucose_forecast.eval.split import chronological_split, heldout_user_split
+import insulink_predictor.eval.split as split_mod
+from insulink_predictor.eval.split import chronological_split, heldout_user_split
 
 
 def test_chronological_train_precedes_test_per_user(grid):
@@ -40,7 +40,13 @@ def test_no_randomness_in_split_source():
     """
     tree = ast.parse(inspect.getsource(split_mod))
     forbidden_calls = {
-        "sample", "shuffle", "permutation", "choice", "randint", "rand", "randn",
+        "sample",
+        "shuffle",
+        "permutation",
+        "choice",
+        "randint",
+        "rand",
+        "randn",
         "train_test_split",
     }
     for node in ast.walk(tree):

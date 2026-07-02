@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from glucose_forecast.eval.error_grid import (
+from insulink_predictor.eval.error_grid import (
     clarke_zone_pct,
     parkes_zone_pct,
     unsafe_fraction,

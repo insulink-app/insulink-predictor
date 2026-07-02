@@ -56,7 +56,7 @@ class PathsConfig(BaseModel):
 
 class MLflowConfig(BaseModel):
     tracking_uri: str = "file:./mlruns"
-    experiment: str = "glucose-forecast"
+    experiment: str = "insulink-predictor"
     enabled: bool = True
 
 

@@ -1,0 +1,5 @@
+model,horizon_min,n,rmse,mae,skill
+persistence,30,6729,9.368,6.337,0.0
+persistence,60,6658,13.32,8.681,0.0
+lgbm,30,6729,7.416,4.789,0.2084
+lgbm,60,6658,11.249,7.075,0.1555
