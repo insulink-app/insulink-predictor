@@ -1,0 +1,4 @@
+| horizon_min | parkes_A | parkes_B | parkes_C | parkes_D | parkes_E | parkes_unsafe_CDE | clarke_A | clarke_B |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 30.0 | 98.306 | 1.694 | 0.0 | 0.0 | 0.0 | 0.0 | 97.355 | 2.586 |
+| 60.0 | 96.305 | 3.695 | 0.0 | 0.0 | 0.0 | 0.0 | 92.746 | 7.149 |

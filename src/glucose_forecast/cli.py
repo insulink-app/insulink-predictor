@@ -51,5 +51,19 @@ def synth(
     )
 
 
+@app.command()
+def eval(
+    config: Path = typer.Option(Path("config/config.yaml"), help="Path to config.yaml."),
+) -> None:
+    """Evaluate the persistence baseline: RMSE/MAE per horizon + Parkes error grid."""
+    from .eval.harness import run_baseline_eval
+
+    cfg = load_config(config)
+    res = run_baseline_eval(cfg, write=True)
+    typer.echo("Persistence baseline (test split):")
+    typer.echo(res["metrics"].to_string(index=False))
+    typer.echo(f"\nError grid + tables written to {cfg.paths.reports_dir}/")
+
+
 if __name__ == "__main__":  # pragma: no cover
     app()
