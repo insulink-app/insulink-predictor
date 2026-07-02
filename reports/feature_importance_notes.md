@@ -6,22 +6,26 @@ test split:
 
 | model | @30 RMSE | @60 RMSE | skill@30 | skill@60 |
 |---|---|---|---|---|
-| persistence | 9.37 | 13.32 | 0.000 | 0.000 |
-| **lgbm** | **7.42** | **11.25** | **+0.208** | **+0.156** |
+| persistence | 7.90 | 11.08 | 0.000 | 0.000 |
+| **lgbm** | **6.78** | **10.07** | **+0.141** | **+0.091** |
 
 ## Which context features actually carry (ROADMAP §Phase 2 expectation)
 
-- **Recent glucose dominates:** `lag_0` (current value) ≈ 45% gain, then
-  `roll30_max`, `lag_5`, `roll30_mean` — the model is persistence *plus* the
-  short-term trajectory shape.
-- **Context that matters, as predicted:** `cob` (carbs-on-board, ~4.5%),
-  `hour_sin` (time-of-day / circadian, ~4.3%) and `time_since_meal` (~3.8%) are
-  the strongest non-glucose signals — i.e. **time-of-day and time-since-meal are
-  high**, exactly the roadmap's hypothesis. `iob` and `time_since_activity` add
-  smaller but real contributions.
-- **Weather is low, as predicted:** `weather_now` sits at ~1.1% (rank ~12) —
-  measured, not believed (§3). It is kept as an optional feature but carries
-  little signal in this data.
+- **Recent glucose dominates:** `lag_0` (current value) ≈ 51% gain, then
+  `roll30_max`, `lag_5` — the model is persistence *plus* the short-term
+  trajectory shape.
+- **Context that matters, as predicted:** `time_since_meal` (~3.9%), `cob`
+  (carbs-on-board, ~3.0%) and `hour_sin`/`hour_cos` (time-of-day, ~2.3%/2.0%)
+  are the strongest non-glucose signals — i.e. **time-since-meal and time-of-day
+  are high**, exactly the roadmap's hypothesis. `iob` and `time_since_activity`
+  add smaller but real contributions.
+- **Weather is low, as predicted:** `weather_now` sits at ~1.2% (rank ~10) —
+  measured, not believed (§3).
+
+Note: the *global* importance of the hour features is modest because each user's
+circadian rhythm peaks at a different phase — a shared model can only capture the
+average. That residual per-user circadian structure is exactly what Phase 4's
+per-user models exploit (see `personalization_summary.csv`).
 
 ## Takeaway
 

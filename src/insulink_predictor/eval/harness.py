@@ -20,7 +20,7 @@ from ..models.baseline import persistence_predict
 from .error_grid import clarke_zone_pct, parkes_zone_pct, plot_parkes, unsafe_fraction
 from .metrics import mae, rmse, skill_score
 from .reporting import mlflow_run, plot_curves, plot_feature_importance, write_table
-from .split import chronological_split
+from .split import chronological_split, heldout_user_split
 
 PredFn = Callable[[pd.DataFrame, int], np.ndarray]
 
@@ -283,4 +283,115 @@ def run_event_eval(cfg: Config, df: pd.DataFrame | None = None, write: bool = Tr
         "feature_cols": feature_cols,
         "test": test,
         "examples": examples,
+    }
+
+
+def per_user_skill(test: pd.DataFrame, cfg: Config, pred_fn: PredFn, model_name: str) -> pd.DataFrame:
+    """Per-user, per-horizon RMSE and skill vs persistence."""
+    rows = []
+    for uid, gdf in test.groupby("user_id"):
+        preds = {h: np.asarray(pred_fn(gdf, h)) for h in cfg.horizons_steps}
+        for h in cfg.horizons_steps:
+            valid = gdf[f"valid_{h}"].to_numpy()
+            yt = gdf.loc[valid, f"y_{h}"].to_numpy()
+            yp = preds[h][valid]
+            r_model = rmse(yt, yp)
+            r_pers = rmse(yt, gdf.loc[valid, "glucose_mgdl"].to_numpy())
+            rows.append(
+                {
+                    "model": model_name,
+                    "user_id": uid,
+                    "horizon_min": h * cfg.grid_minutes,
+                    "rmse": round(r_model, 3),
+                    "skill": round(skill_score(r_model, r_pers), 4),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def run_personalize_eval(cfg: Config, df: pd.DataFrame | None = None, write: bool = True) -> dict:
+    """Phase 4 DoD: personalized beats global per-user; cold-start degrades gracefully."""
+    from ..models.personalize import (
+        STATIC_COLS,
+        PersonalizedModel,
+        add_static,
+        train_per_horizon,
+        train_residuals,
+        user_static_features,
+    )
+
+    sup, feature_cols = build_supervised(cfg, df)
+    seen, heldout = heldout_user_split(sup, cfg.split.heldout_users)
+    train, test = chronological_split(seen, cfg.split.test_fraction)
+
+    # global (feature-only) baseline
+    global_models = train_per_horizon(train, feature_cols, cfg)
+
+    # 4a conditioned + 4b residual
+    static = user_static_features(train)
+    train_c = add_static(train, static)
+    cond_models = train_per_horizon(train_c, feature_cols + STATIC_COLS, cfg)
+    residual_models = train_residuals(train_c, cond_models, feature_cols, STATIC_COLS, cfg)
+    personalized = PersonalizedModel(cond_models, residual_models, feature_cols, STATIC_COLS, static)
+
+    def global_pred(d, h):
+        return global_models[h].predict(d[feature_cols])
+
+    gu = per_user_skill(test, cfg, global_pred, "global")
+    pu = per_user_skill(test, cfg, personalized.predict, "personalized")
+    per_user = pd.concat([gu, pu], ignore_index=True)
+
+    # summary: mean per-user skill + how many users improved, per horizon
+    rows = []
+    for h_min in sorted(gu["horizon_min"].unique()):
+        gh = gu[gu["horizon_min"] == h_min].set_index("user_id")["skill"]
+        ph = pu[pu["horizon_min"] == h_min].set_index("user_id")["skill"]
+        improved = int((ph > gh).sum())
+        rows.append(
+            {
+                "horizon_min": h_min,
+                "global_mean_skill": round(gh.mean(), 4),
+                "personalized_mean_skill": round(ph.mean(), 4),
+                "users_improved": improved,
+                "n_users": int(gh.size),
+            }
+        )
+    summary = pd.DataFrame(rows)
+
+    # cold-start: personalized pipeline must run on held-out users without crashing
+    coldstart = {"n_heldout_users": int(heldout["user_id"].nunique()) if len(heldout) else 0}
+    if len(heldout) > 0:
+        finite_ok = True
+        for h in cfg.horizons_steps:
+            valid = heldout[f"valid_{h}"].to_numpy()
+            preds = personalized.predict(heldout, h)
+            finite_ok &= bool(np.isfinite(preds[valid]).all())
+            # cold-start users have no residual model -> base only
+            assert all(uid not in residual_models[h] for uid in heldout["user_id"].unique())
+        coldstart["graceful"] = finite_ok
+
+    if write:
+        reports = Path(cfg.paths.reports_dir)
+        write_table(summary, reports / "personalization_summary.csv")
+        write_table(per_user, reports / "personalization_per_user.csv")
+        with mlflow_run(cfg, "personalize") as log:
+            log.params({"min_residual_rows": 200, "heldout": ",".join(cfg.split.heldout_users)})
+            for _, r in summary.iterrows():
+                hm = int(r["horizon_min"])
+                log.metrics(
+                    {
+                        f"global_skill_h{hm}": r["global_mean_skill"],
+                        f"personalized_skill_h{hm}": r["personalized_mean_skill"],
+                    }
+                )
+
+    return {
+        "summary": summary,
+        "per_user": per_user,
+        "coldstart": coldstart,
+        "personalized": personalized,
+        "global_models": global_models,
+        "feature_cols": feature_cols,
+        "heldout": heldout,
+        "test": test,
     }

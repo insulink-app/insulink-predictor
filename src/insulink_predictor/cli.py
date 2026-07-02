@@ -136,5 +136,37 @@ def _run_event_eval(config: Path) -> None:
     typer.echo(f"Curve forecast plot -> {cfg.paths.reports_dir}/event_curves.png")
 
 
+@app.command(name="train-personalize")
+def train_personalize_cmd(
+    config: Path = typer.Option(Path("config/config.yaml"), help="Path to config.yaml."),
+) -> None:
+    """Train global-conditioned + per-user residual models and evaluate per user."""
+    _run_personalize_eval(config)
+
+
+@app.command(name="eval-personalize")
+def eval_personalize_cmd(
+    config: Path = typer.Option(Path("config/config.yaml"), help="Path to config.yaml."),
+) -> None:
+    """Compare personalized vs global per-user skill; check cold-start on held-out users."""
+    _run_personalize_eval(config)
+
+
+def _run_personalize_eval(config: Path) -> None:
+    from .eval.harness import run_personalize_eval
+
+    cfg = load_config(config)
+    res = run_personalize_eval(cfg, write=True)
+    s = res["summary"]
+    typer.echo("Personalization (per-user mean skill):")
+    typer.echo(s.to_string(index=False))
+    verdict = "PASS" if (s["personalized_mean_skill"] > s["global_mean_skill"]).all() else "FAIL"
+    cs = res["coldstart"]
+    typer.echo(f"\nPersonalized beats global (per-user)? {verdict}")
+    typer.echo(f"Cold-start on {cs.get('n_heldout_users', 0)} held-out user(s) graceful? "
+               f"{cs.get('graceful', 'n/a')}")
+    typer.echo(f"Reports written to {cfg.paths.reports_dir}/")
+
+
 if __name__ == "__main__":  # pragma: no cover
     app()
