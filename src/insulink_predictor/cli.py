@@ -52,6 +52,56 @@ def synth(
 
 
 @app.command()
+def load(
+    config: Path = typer.Option(Path("config/config.yaml"), help="Path to config.yaml."),
+    since: Optional[str] = typer.Option(None, help="Only rows on/after this date, e.g. 2024-01-01."),
+    out: Optional[Path] = typer.Option(None, help="Output parquet (default: data/processed/grid.parquet)."),
+) -> None:
+    """Fetch real data from PostgreSQL, align to the grid, validate, write parquet.
+
+    Credentials come from env (DATABASE_URL or GF_PG__*); nothing is hardcoded.
+    """
+    from .data.align import align
+    from .data.load import load_raw
+
+    cfg = load_config(config)
+    raw = load_raw(cfg, since=since)
+    if raw.empty:
+        typer.echo("load: no rows returned (check DATABASE_URL / filters).")
+        raise typer.Exit(code=1)
+    grid = align(raw, cfg)  # validates against the schema internally
+
+    out = out or cfg.paths.data_dir / "processed" / "grid.parquet"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    grid.to_parquet(out)
+
+    gaps = int(grid["sensor_gap"].sum())
+    typer.echo(
+        f"load: {grid['user_id'].nunique()} users, {len(grid)} rows "
+        f"({gaps} gap buckets, {gaps / len(grid):.1%}) -> {out}"
+    )
+
+
+@app.command(name="db-inspect")
+def db_inspect(
+    config: Path = typer.Option(Path("config/config.yaml"), help="Path to config.yaml."),
+    out: Optional[Path] = typer.Option(None, help="Write the JSON report here (default: reports/db_inspection.json)."),
+) -> None:
+    """Probe the DB: ts unit, glucose unit, CGM cadence, type vocabularies, JSON samples."""
+    import json
+
+    from .data.load import inspect
+
+    cfg = load_config(config)
+    report = inspect(cfg)
+    out = out or cfg.paths.reports_dir / "db_inspection.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
+    typer.echo(json.dumps(report, indent=2, default=str))
+    typer.echo(f"\n-> {out}")
+
+
+@app.command()
 def features(
     config: Path = typer.Option(Path("config/config.yaml"), help="Path to config.yaml."),
     out: Optional[Path] = typer.Option(None, help="Output parquet (default: data/processed/features.parquet)."),

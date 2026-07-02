@@ -21,6 +21,8 @@ dependencies = [
     "mlflow>=2.14",
     "matplotlib>=3.8",
     "pyarrow>=16.0",
+    "psycopg[binary]>=3.1",
+    "sqlalchemy>=2.0",
 ]
 
 [project.scripts]

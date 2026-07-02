@@ -60,6 +60,46 @@ class MLflowConfig(BaseModel):
     enabled: bool = True
 
 
+class PostgresConfig(BaseModel):
+    """Connection + ingestion settings for the real PostgreSQL source (§7).
+
+    Secrets never live in YAML. Provide credentials via env: either a full
+    ``GF_PG__DSN`` / ``DATABASE_URL``, or ``GF_PG__PASSWORD`` etc.
+    """
+
+    dsn: str | None = None          # full SQLAlchemy URL; overrides the parts below
+    host: str = "localhost"
+    port: int = 5432
+    database: str = "insulink"
+    user: str = "postgres"
+    password: str = ""
+    sslmode: str = "prefer"
+    db_schema: str = "public"
+
+    # Confirmed source conventions (kept overridable; "auto" falls back to detection):
+    # recorded_at is unix epoch milliseconds, glucose is mg/dL.
+    ts_unit: str = "ms"                # ms | s | auto
+    source_glucose_unit: str = "mg/dL"  # mg/dL | mmol/L | auto
+    local_tz: str = "Europe/Berlin"    # for ts_local (circadian); per-user tz is future work
+    only_compliant: bool = True        # users.compliant filter
+
+    def url(self) -> str:
+        """Build a SQLAlchemy URL from ``dsn``/``DATABASE_URL`` or the parts."""
+        import os
+
+        dsn = self.dsn or os.environ.get("DATABASE_URL")
+        if dsn:
+            # normalise the common postgres:// prefix to the psycopg3 driver
+            return dsn.replace("postgresql://", "postgresql+psycopg://").replace(
+                "postgres://", "postgresql+psycopg://"
+            )
+        pw = self.password or os.environ.get("GF_PG__PASSWORD", "")
+        return (
+            f"postgresql+psycopg://{self.user}:{pw}@{self.host}:{self.port}/"
+            f"{self.database}?sslmode={self.sslmode}"
+        )
+
+
 class Config(BaseSettings):
     """Top-level config. Loaded from YAML; env vars (prefix ``GF_``) may override."""
 
@@ -74,6 +114,7 @@ class Config(BaseSettings):
     split: SplitConfig = SplitConfig()
     paths: PathsConfig = PathsConfig()
     mlflow: MLflowConfig = MLflowConfig()
+    pg: PostgresConfig = PostgresConfig()
 
     model_config = SettingsConfigDict(
         env_prefix="GF_", env_nested_delimiter="__", extra="ignore"

@@ -21,10 +21,27 @@ brew install libomp
 ## Pipeline (`gf`)
 
 ```bash
-uv run gf synth       # generate synthetic data -> align -> validate -> data/processed/grid.parquet
+uv run gf synth       # synthetic data -> align -> validate -> data/processed/grid.parquet
+uv run gf features    # strictly-causal feature matrix
+uv run gf eval        # LightGBM vs persistence (skill-score + Parkes error grid)
+uv run gf eval-events        # post-meal vs global skill + 60-min trajectory plot
+uv run gf eval-personalize   # personalized vs global per-user + cold-start check
 ```
 
-Later phases add `gf features`, `gf train-*`, `gf eval*`.
+### Real data (PostgreSQL)
+
+Credentials come from the environment — never hardcoded or committed:
+
+```bash
+export DATABASE_URL="postgresql://user:pass@host:5432/insulink"   # or GF_PG__* vars
+uv run gf db-inspect  # probe: ts unit, glucose unit, CGM cadence, type vocabularies
+uv run gf load        # fetch -> align -> validate -> data/processed/grid.parquet
+uv run gf load --since 2024-01-01
+```
+
+The schema has insulin + carbs (`bolus_entries`) → a **Type-1 insulin population**,
+so COB/IOB are primary features (§7). `recorded_at` is unix-ms, `glucose` is mg/dL.
+Run `gf db-inspect` to pin the `sport_measurements` / `events` type mappings.
 
 ## Tests
 
