@@ -1,0 +1,46 @@
+# Glucose Forecasting Engine — single source of truth for units, grid and flags.
+# ROADMAP §3/§7: unit and interval are explicit here, never hardcoded in code.
+
+glucose_unit: mg/dL        # §7.3 — fix the unit. mmol/L would be ×18 at load time.
+grid_minutes: 5            # §7.4 / §3 — CGM grid resolution.
+horizons_min: [30, 60]     # §4 — forecast horizons (=> 6 and 12 steps).
+max_interp_gap_min: 15     # §6 — interpolate gaps up to here; longer => sensor_gap, no over-interpolation.
+
+features:
+  glucose_lags_min: [0, 5, 10, 15, 30, 45, 60]
+  roll_windows_min: [30, 60]
+  steps_windows_min: [15, 30, 60]
+  use_carbs: true          # optional COB proxy (§7.1) — degrades cleanly if absent
+  use_insulin: true        # optional IOB proxy (§7.1) — degrades cleanly if absent
+  use_hr: true
+  use_weather: true        # expected low importance — measured, not believed (§3)
+  cob_tau_min: 45.0        # carbs-on-board exponential decay
+  iob_tau_min: 55.0        # insulin-on-board exponential decay
+
+event:
+  meal_trigger: true
+  glucose_rate_threshold: 1.5   # mg/dL per min — glucose-rise trigger (§ Phase 3)
+  activity_trigger: true
+  post_event_window_min: 60
+
+synth:
+  n_users: 6
+  days: 21
+  seed: 42
+  meals_per_day: 3
+  insulin_user_fraction: 0.5    # half the users log insulin (exercises optional-feature degrade)
+  dropout_prob: 0.02            # per-reading random CGM dropout
+  gap_events_per_day: 0.5       # larger contiguous sensor gaps
+
+split:
+  test_fraction: 0.2            # last 20% chronological per user (§ Phase 1)
+  heldout_users: ["user_5"]     # cold-start holdout (§ Phase 4)
+
+paths:
+  data_dir: data
+  reports_dir: reports
+
+mlflow:
+  tracking_uri: "file:./mlruns"
+  experiment: glucose-forecast
+  enabled: true
