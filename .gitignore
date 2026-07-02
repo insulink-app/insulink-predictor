@@ -16,5 +16,8 @@ wheels/
 # Experiment tracking
 /mlruns/
 
+# Secrets / local env (compose + app credentials)
+.env
+
 # OS / editor
 .DS_Store

@@ -1,0 +1,42 @@
+# Local PostgreSQL for the insulink-predictor engine.
+#
+# The app (`uv run gf load`, `gf db-inspect`) reads DATABASE_URL / GF_PG__* from
+# the environment — see PostgresConfig in src/insulink_predictor/config.py. This
+# compose file only stands up the database; the Python app runs on the host via
+# uv. Credentials come from .env (copy .env.example -> .env).
+#
+#   docker compose up -d          # start Postgres in the background
+#   uv run --env-file .env gf db-inspect   # app connects via DATABASE_URL
+#   docker compose down           # stop (keeps data)
+#   docker compose down -v        # stop and wipe the volume
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: insulink-postgres
+    restart: unless-stopped
+    environment:
+      # Defaults match PostgresConfig (database "insulink", user "postgres").
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-insulink}
+      POSTGRES_DB: ${POSTGRES_DB:-insulink}
+      # Deterministic collation so index/order behaviour matches across machines.
+      POSTGRES_INITDB_ARGS: "--locale=C.UTF-8"
+    ports:
+      # Host port is configurable so it won't clash with a native Postgres on 5432.
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Any *.sql / *.sh here runs once, on first boot of an empty volume.
+      # Drop schema DDL (glucose_entries, users, user_settings, ...) in ./docker/initdb.
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # `docker compose up --wait` and dependents block until this passes.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-insulink}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  pgdata:
