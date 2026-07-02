@@ -37,7 +37,9 @@ def test_therapy_degrades_when_settings_absent():
     grid, cfg = _grid()
     stripped = grid.drop(columns=["isf", "icr"])  # dataset without therapy settings
     feat, cols = build_features(stripped, cfg)
-    assert "cob_glucose" not in cols and "iob_glucose" not in cols  # no crash, just absent
+    assert (
+        "cob_glucose" not in cols and "iob_glucose" not in cols
+    )  # no crash, just absent
 
 
 def test_flag_disables_therapy_features():

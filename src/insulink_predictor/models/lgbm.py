@@ -30,14 +30,16 @@ def _make_regressor() -> LGBMRegressor:
         colsample_bytree=0.8,
         reg_lambda=4.0,
         random_state=_SEED,
-        n_jobs=1,            # deterministic
+        n_jobs=1,  # deterministic
         deterministic=True,
         force_col_wise=True,
         verbose=-1,
     )
 
 
-def train_lgbm(train: pd.DataFrame, feature_cols: list[str], cfg: Config) -> dict[int, LGBMRegressor]:
+def train_lgbm(
+    train: pd.DataFrame, feature_cols: list[str], cfg: Config
+) -> dict[int, LGBMRegressor]:
     """Train one LGBM per horizon on the valid rows of the training split.
 
     With ``cfg.features.predict_delta`` the target is the change over persistence
@@ -57,7 +59,11 @@ def train_lgbm(train: pd.DataFrame, feature_cols: list[str], cfg: Config) -> dic
     return models
 
 
-def make_pred_fn(models: dict[int, LGBMRegressor], feature_cols: list[str], predict_delta: bool = True):
+def make_pred_fn(
+    models: dict[int, LGBMRegressor],
+    feature_cols: list[str],
+    predict_delta: bool = True,
+):
     """Wrap trained models into a harness-compatible ``pred_fn(df, h)`` (absolute mg/dL)."""
 
     def pred_fn(df: pd.DataFrame, horizon_steps: int) -> np.ndarray:
@@ -69,7 +75,9 @@ def make_pred_fn(models: dict[int, LGBMRegressor], feature_cols: list[str], pred
     return pred_fn
 
 
-def feature_importance(models: dict[int, LGBMRegressor], feature_cols: list[str]) -> pd.DataFrame:
+def feature_importance(
+    models: dict[int, LGBMRegressor], feature_cols: list[str]
+) -> pd.DataFrame:
     """Mean gain-importance across horizons, normalized to percent (desc)."""
     rows = []
     for h, model in models.items():

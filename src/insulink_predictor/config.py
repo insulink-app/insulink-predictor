@@ -16,8 +16,8 @@ DEFAULT_CONFIG_PATH = Path("config/config.yaml")
 
 
 class FeatureConfig(BaseModel):
-    glucose_lags_min: list[int] = [0, 5, 10, 15, 30, 45, 60]
-    roll_windows_min: list[int] = [30, 60]
+    glucose_lags_min: list[int] = [0, 5, 10, 15, 30, 45, 60, 90, 120]
+    roll_windows_min: list[int] = [30, 60, 120]
     steps_windows_min: list[int] = [15, 30, 60]
     use_carbs: bool = True
     use_insulin: bool = True
@@ -25,11 +25,15 @@ class FeatureConfig(BaseModel):
     use_weather: bool = True
     cob_tau_min: float = 45.0
     iob_tau_min: float = 55.0
+    # Insulin/carb ACTIVITY (rate of action) kernels: t·exp(−t/τ), peak at τ.
+    # Activity drives the near-term glucose change; IOB/COB stock does not.
+    ins_activity_tau_min: float = 55.0
+    carb_activity_tau_min: float = 35.0
     # Therapy features: express COB/IOB in glucose-equivalent mg/dL using each
     # user's ISF (correction factor) and ICR (carb ratio) from user_settings.
     use_therapy: bool = True
-    default_isf: float = 40.0   # mg/dL per 1U, fallback when a user has no setting
-    default_icr: float = 12.0   # g carbs per 1U, fallback
+    default_isf: float = 40.0  # mg/dL per 1U, fallback when a user has no setting
+    default_icr: float = 12.0  # g carbs per 1U, fallback
 
     # Model the CHANGE over persistence (target = y_{t+h} − g_t) instead of the
     # absolute level. The regularized learner shrinks the delta toward ~0 when
@@ -78,7 +82,7 @@ class PostgresConfig(BaseModel):
     ``GF_PG__DSN`` / ``DATABASE_URL``, or ``GF_PG__PASSWORD`` etc.
     """
 
-    dsn: str | None = None          # full SQLAlchemy URL; overrides the parts below
+    dsn: str | None = None  # full SQLAlchemy URL; overrides the parts below
     host: str = "localhost"
     port: int = 5432
     database: str = "insulink"
@@ -89,10 +93,12 @@ class PostgresConfig(BaseModel):
 
     # Confirmed source conventions (kept overridable; "auto" falls back to detection):
     # recorded_at is unix epoch milliseconds, glucose is mg/dL.
-    ts_unit: str = "ms"                # ms | s | auto
+    ts_unit: str = "ms"  # ms | s | auto
     source_glucose_unit: str = "mg/dL"  # mg/dL | mmol/L | auto
-    local_tz: str = "Europe/Berlin"    # for ts_local (circadian); per-user tz is future work
-    only_compliant: bool = True        # users.compliant filter
+    local_tz: str = (
+        "Europe/Berlin"  # for ts_local (circadian); per-user tz is future work
+    )
+    only_compliant: bool = True  # users.compliant filter
 
     def url(self) -> str:
         """Build a SQLAlchemy URL from ``dsn``/``DATABASE_URL`` or the parts."""

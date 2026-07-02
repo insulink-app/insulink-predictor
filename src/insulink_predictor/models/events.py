@@ -18,7 +18,9 @@ def detect_events(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     """Flag causal triggers: meal logged / glucose rise over threshold / activity."""
     out = df.sort_values(["user_id", "ts_utc"]).reset_index(drop=True).copy()
 
-    out["event_meal"] = out["meal_flag"].astype(bool) if cfg.event.meal_trigger else False
+    out["event_meal"] = (
+        out["meal_flag"].astype(bool) if cfg.event.meal_trigger else False
+    )
 
     if "rate_short" in out.columns:
         rate = out["rate_short"]
@@ -49,7 +51,10 @@ def build_curve_targets(df: pd.DataFrame, max_step: int) -> pd.DataFrame:
 
 
 def train_curve_models(
-    train: pd.DataFrame, feature_cols: list[str], max_step: int, predict_delta: bool = True
+    train: pd.DataFrame,
+    feature_cols: list[str],
+    max_step: int,
+    predict_delta: bool = True,
 ) -> dict[int, object]:
     """Train one LightGBM per step ``1..max_step`` on valid rows.
 
@@ -67,7 +72,10 @@ def train_curve_models(
 
 
 def forecast_curve(
-    df: pd.DataFrame, models: dict[int, object], feature_cols: list[str], predict_delta: bool = True
+    df: pd.DataFrame,
+    models: dict[int, object],
+    feature_cols: list[str],
+    predict_delta: bool = True,
 ) -> np.ndarray:
     """Return the predicted trajectory in absolute mg/dL, shape ``(n_rows, max_step)``."""
     X = df[feature_cols]

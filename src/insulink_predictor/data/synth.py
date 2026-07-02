@@ -23,8 +23,8 @@ _KERNEL_MIN = 240  # 4h support for meal / insulin / activity response kernels
 
 # Kernel peak fractions calibrated so effects stay in a realistic mg/dL range:
 # a ~80 g meal at CSF≈3.3 peaks ~+48 mg/dL; a bolus at ISF≈40 peaks ~dose·3.2.
-_CARB_PEAK_FRAC = 0.18   # peak carb rise = frac · carbs · csf   (csf = isf/icr)
-_INS_PEAK_FRAC = 0.08    # peak insulin drop = frac · dose · isf
+_CARB_PEAK_FRAC = 0.18  # peak carb rise = frac · carbs · csf   (csf = isf/icr)
+_INS_PEAK_FRAC = 0.08  # peak insulin drop = frac · dose · isf
 
 
 def _biexp_kernel(

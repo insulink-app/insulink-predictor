@@ -58,7 +58,9 @@ def user_static_features(train: pd.DataFrame) -> pd.DataFrame:
     }
     for therapy in ("isf", "icr"):
         if therapy in train.columns:
-            cols[f"user_{therapy}"] = g[therapy].first()  # distinct name: grid carries isf/icr too
+            cols[f"user_{therapy}"] = g[
+                therapy
+            ].first()  # distinct name: grid carries isf/icr too
     return pd.DataFrame(cols).reset_index()
 
 
@@ -72,7 +74,9 @@ def add_static(df: pd.DataFrame, static: pd.DataFrame) -> pd.DataFrame:
     return df.merge(static, on="user_id", how="left")
 
 
-def train_per_horizon(train: pd.DataFrame, cols: list[str], cfg: Config) -> dict[int, LGBMRegressor]:
+def train_per_horizon(
+    train: pd.DataFrame, cols: list[str], cfg: Config
+) -> dict[int, LGBMRegressor]:
     delta = cfg.features.predict_delta
     models: dict[int, LGBMRegressor] = {}
     for h in cfg.horizons_steps:
@@ -87,8 +91,15 @@ def train_per_horizon(train: pd.DataFrame, cols: list[str], cfg: Config) -> dict
 class PersonalizedModel:
     """Conditioned global base (4a) + per-user residual models (4b)."""
 
-    def __init__(self, cond_models, residual_models, feature_cols, static_cols, static_table,
-                 predict_delta: bool = True):
+    def __init__(
+        self,
+        cond_models,
+        residual_models,
+        feature_cols,
+        static_cols,
+        static_table,
+        predict_delta: bool = True,
+    ):
         self.cond_models = cond_models
         self.residual_models = residual_models  # {h: {user_id: model}}
         self.feature_cols = feature_cols
@@ -99,9 +110,11 @@ class PersonalizedModel:
     def predict(self, df: pd.DataFrame, horizon_steps: int) -> np.ndarray:
         d = df.reset_index(drop=True)
         merged = d.merge(self.static_table, on="user_id", how="left")  # preserves order
-        base = self.cond_models[horizon_steps].predict(
-            merged[self.feature_cols + self.static_cols]
-        ).astype(float)
+        base = (
+            self.cond_models[horizon_steps]
+            .predict(merged[self.feature_cols + self.static_cols])
+            .astype(float)
+        )
         if self.predict_delta:
             base = base + d["glucose_mgdl"].to_numpy()  # delta → absolute
         # add the per-user (absolute) residual where a model exists; cold-start → +0
@@ -112,20 +125,37 @@ class PersonalizedModel:
         return base
 
 
+def _rmse(a, b) -> float:
+    return float(np.sqrt(np.mean((np.asarray(a) - np.asarray(b)) ** 2)))
+
+
 def train_residuals(train_c, cond_models, feature_cols, static_cols, cfg) -> dict:
-    """Fit a tiny residual model per (horizon, user) on that user's train residuals."""
+    """Fit a tiny residual model per (horizon, user), keeping it only if it helps.
+
+    Each user's residual is validated on a held-out chronological slice of their
+    own training data; if it doesn't beat the base there, it is dropped (that user
+    stays global). This makes personalization non-harmful by construction — a
+    residual is never applied unless it demonstrably improves that user.
+    """
     delta = cfg.features.predict_delta
     residual_models: dict[int, dict] = {}
     for h in cfg.horizons_steps:
         base = cond_models[h].predict(train_c[feature_cols + static_cols]).astype(float)
         if delta:
             base = base + train_c["glucose_mgdl"].to_numpy()  # absolute base
-        tc = train_c.assign(_resid=train_c[f"y_{h}"] - base)  # residual is absolute
+        tc = train_c.assign(_base=base, _resid=train_c[f"y_{h}"] - base)
         residual_models[h] = {}
         for uid, gdf in tc.groupby("user_id"):
-            valid = gdf[f"valid_{h}"].to_numpy()
-            if valid.sum() < MIN_RESIDUAL_ROWS:
+            g = gdf[gdf[f"valid_{h}"].to_numpy()]
+            if len(g) < MIN_RESIDUAL_ROWS:
                 continue  # not enough history yet → stay global (graceful)
-            model = _small_regressor().fit(gdf.loc[valid, feature_cols], gdf.loc[valid, "_resid"])
-            residual_models[h][uid] = model
+            cut = int(len(g) * 0.8)
+            fit, val = g.iloc[:cut], g.iloc[cut:]
+            if len(val) < 30:
+                continue
+            trial = _small_regressor().fit(fit[feature_cols], fit["_resid"])
+            yv, basev = val[f"y_{h}"].to_numpy(), val["_base"].to_numpy()
+            if _rmse(yv, basev + trial.predict(val[feature_cols])) < _rmse(yv, basev):
+                # helps on the user's own holdout → refit on all their data
+                residual_models[h][uid] = _small_regressor().fit(g[feature_cols], g["_resid"])
     return residual_models

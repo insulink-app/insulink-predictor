@@ -46,7 +46,9 @@ def test_coldstart_user_has_no_residual_and_predicts_finite(personalize_result):
     heldout = res["heldout"]
     for h in cfg.horizons_steps:
         # a brand-new user has no per-user residual model -> falls back to the base
-        assert all(uid not in pm.residual_models[h] for uid in heldout["user_id"].unique())
+        assert all(
+            uid not in pm.residual_models[h] for uid in heldout["user_id"].unique()
+        )
         valid = heldout[f"valid_{h}"].to_numpy()
         preds = pm.predict(heldout, h)
         assert np.isfinite(preds[valid]).all()

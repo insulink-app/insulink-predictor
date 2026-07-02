@@ -19,7 +19,9 @@ def lgbm_result():
 
 def test_lgbm_beats_persistence_every_horizon(lgbm_result):
     for _, r in lgbm_result["lgbm_metrics"].iterrows():
-        assert r["skill"] > 0, f"skill@{r['horizon_min']}min = {r['skill']} (must be > 0)"
+        assert r["skill"] > 0, (
+            f"skill@{r['horizon_min']}min = {r['skill']} (must be > 0)"
+        )
 
 
 def test_lgbm_rmse_below_persistence(lgbm_result):
@@ -33,8 +35,20 @@ def test_context_features_drive_delta_and_weather_is_not_top(lgbm_result):
     # (time-since-meal, circadian, rate) drive it — not the absolute level.
     fi = lgbm_result["feature_importance"].set_index("feature")["gain_pct"]
     drivers = {
-        "time_since_meal", "time_since_activity", "rate_short", "rate_long",
-        "hour_sin", "hour_cos", "roll30_max", "roll60_max", "cob_glucose", "accel",
+        "time_since_meal",
+        "time_since_activity",
+        "rate_short",
+        "rate_long",
+        "hour_sin",
+        "hour_cos",
+        "roll30_max",
+        "roll60_max",
+        "roll120_max",
+        "cob_glucose",
+        "carb_activity",
+        "ins_activity",
+        "time_since_bolus",
+        "accel",
     }
     assert fi.index[0] in drivers, f"top feature {fi.index[0]} not an expected driver"
     assert "weather_now" not in set(fi.index[:3])  # measured, not believed (§3)

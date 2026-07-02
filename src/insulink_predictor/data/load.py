@@ -35,9 +35,19 @@ from ..config import Config, PostgresConfig
 
 # The RAW contract (identical to synth.generate's output) that align() consumes.
 RAW_COLUMNS = [
-    "user_id", "ts_utc", "ts_local", "glucose_mgdl", "meal_flag",
-    "carbs_g", "insulin_u", "steps", "activity_flag", "hr", "weather_temp",
-    "isf", "icr",
+    "user_id",
+    "ts_utc",
+    "ts_local",
+    "glucose_mgdl",
+    "meal_flag",
+    "carbs_g",
+    "insulin_u",
+    "steps",
+    "activity_flag",
+    "hr",
+    "weather_temp",
+    "isf",
+    "icr",
 ]
 
 # Heuristic type maps for sport_measurements (confirm against `gf db-inspect`).
@@ -100,7 +110,9 @@ def _is_intraday(ts, grid_minutes: int) -> bool:
     return med_gap_min <= max(60.0, grid_minutes * 6)
 
 
-def _expand_intervals(df: pd.DataFrame, grid_minutes: int, max_hours: int = 6) -> pd.DataFrame:
+def _expand_intervals(
+    df: pd.DataFrame, grid_minutes: int, max_hours: int = 6
+) -> pd.DataFrame:
     """Expand [start,end] activity windows to grid-spaced timestamps (bounded)."""
     rows = []
     freq = f"{grid_minutes}min"
@@ -150,7 +162,9 @@ def assemble_raw(tables: dict[str, pd.DataFrame], cfg: Config) -> pd.DataFrame:
             _channel_block(
                 g["user_id"],
                 to_datetime_utc(g["recorded_at"], pg.ts_unit),
-                glucose_mgdl=_plausible_glucose(to_mgdl(g["value"], pg.source_glucose_unit)),
+                glucose_mgdl=_plausible_glucose(
+                    to_mgdl(g["value"], pg.source_glucose_unit)
+                ),
             )
         )
 
@@ -160,12 +174,18 @@ def assemble_raw(tables: dict[str, pd.DataFrame], cfg: Config) -> pd.DataFrame:
     b = tables.get("bolus_entries")
     if b is not None and len(b):
         carbs = pd.to_numeric(b["carbohydrates"], errors="coerce").to_numpy()
-        smbg = to_mgdl(b["glucose"], pg.source_glucose_unit) if "glucose" in b else pd.Series(np.full(len(b), np.nan))
+        smbg = (
+            to_mgdl(b["glucose"], pg.source_glucose_unit)
+            if "glucose" in b
+            else pd.Series(np.full(len(b), np.nan))
+        )
         blocks.append(
             _channel_block(
                 b["user_id"],
                 to_datetime_utc(b["recorded_at"], pg.ts_unit),
-                glucose_mgdl=_plausible_glucose(smbg),  # drops no-reading placeholders (e.g. 1.0)
+                glucose_mgdl=_plausible_glucose(
+                    smbg
+                ),  # drops no-reading placeholders (e.g. 1.0)
                 carbs_g=np.where(carbs > 0, carbs, np.nan),
                 insulin_u=pd.to_numeric(b["insulin"], errors="coerce").to_numpy(),
                 meal_flag=(carbs > 0),
@@ -186,7 +206,11 @@ def assemble_raw(tables: dict[str, pd.DataFrame], cfg: Config) -> pd.DataFrame:
             mask = t.isin(typeset).to_numpy()
             if mask.any() and _is_intraday(ts[mask], cfg.grid_minutes):
                 blocks.append(
-                    _channel_block(sm["user_id"].to_numpy()[mask], ts[mask], **{channel: val.to_numpy()[mask]})
+                    _channel_block(
+                        sm["user_id"].to_numpy()[mask],
+                        ts[mask],
+                        **{channel: val.to_numpy()[mask]},
+                    )
                 )
 
     # --- activity windows (trainings + workouts) ---------------------------
@@ -207,14 +231,25 @@ def assemble_raw(tables: dict[str, pd.DataFrame], cfg: Config) -> pd.DataFrame:
         start = to_datetime_utc(sw["started_at"], pg.ts_unit)
         act_frames.append(
             pd.DataFrame(
-                {"user_id": sw["user_id"].astype(str), "_start": start,
-                 "_end": start + pd.Timedelta(minutes=45)}  # assume a default session length
+                {
+                    "user_id": sw["user_id"].astype(str),
+                    "_start": start,
+                    "_end": start + pd.Timedelta(minutes=45),
+                }  # assume a default session length
             )
         )
     if act_frames:
-        expanded = _expand_intervals(pd.concat(act_frames, ignore_index=True), cfg.grid_minutes)
+        expanded = _expand_intervals(
+            pd.concat(act_frames, ignore_index=True), cfg.grid_minutes
+        )
         if len(expanded):
-            blocks.append(_channel_block(expanded["user_id"], expanded["ts_utc"], activity_flag=np.ones(len(expanded), bool)))
+            blocks.append(
+                _channel_block(
+                    expanded["user_id"],
+                    expanded["ts_utc"],
+                    activity_flag=np.ones(len(expanded), bool),
+                )
+            )
 
     if not blocks:
         return pd.DataFrame(columns=RAW_COLUMNS)
@@ -273,7 +308,9 @@ def _q(schema: str, name: str) -> str:
     return f'"{schema}"."{name}"'
 
 
-def fetch_tables(cfg: Config, engine=None, since=None, user_ids: Optional[list[str]] = None) -> dict[str, pd.DataFrame]:
+def fetch_tables(
+    cfg: Config, engine=None, since=None, user_ids: Optional[list[str]] = None
+) -> dict[str, pd.DataFrame]:
     """Fetch the forecasting-relevant tables into DataFrames.
 
     ``since`` (a pandas-parseable datetime) filters time-series rows server-side;
@@ -283,7 +320,11 @@ def fetch_tables(cfg: Config, engine=None, since=None, user_ids: Optional[list[s
 
     pg = cfg.pg
     engine = engine or connect(cfg)
-    ts_unit = detect_ts_unit(_probe_recorded_at(engine, pg)) if pg.ts_unit == "auto" else pg.ts_unit
+    ts_unit = (
+        detect_ts_unit(_probe_recorded_at(engine, pg))
+        if pg.ts_unit == "auto"
+        else pg.ts_unit
+    )
     since_epoch = None
     if since is not None:
         secs = int(pd.Timestamp(since).timestamp())
@@ -292,7 +333,9 @@ def fetch_tables(cfg: Config, engine=None, since=None, user_ids: Optional[list[s
     def where(time_col: str) -> tuple[str, dict]:
         clauses, params = [], {}
         if pg.only_compliant:
-            clauses.append(f"user_id IN (SELECT id FROM {_q(pg.db_schema, 'users')} WHERE compliant = true)")
+            clauses.append(
+                f"user_id IN (SELECT id FROM {_q(pg.db_schema, 'users')} WHERE compliant = true)"
+            )
         if since_epoch is not None:
             clauses.append(f"{time_col} >= :since")
             params["since"] = since_epoch
@@ -308,7 +351,10 @@ def fetch_tables(cfg: Config, engine=None, since=None, user_ids: Optional[list[s
             "recorded_at",
         ),
         "sport_measurements": ("user_id, recorded_at, type, value", "recorded_at"),
-        "sport_trainings": ("user_id, started_at, ended_at, type, distance", "started_at"),
+        "sport_trainings": (
+            "user_id, started_at, ended_at, type, distance",
+            "started_at",
+        ),
         "sport_workouts": ("user_id, started_at", "started_at"),
     }
     out: dict[str, pd.DataFrame] = {}
@@ -318,9 +364,15 @@ def fetch_tables(cfg: Config, engine=None, since=None, user_ids: Optional[list[s
         out[name] = pd.read_sql(sql, engine, params=params)
 
     # user_settings has no recorded_at → fetch per user (for ISF/ICR therapy features)
-    ucl = " WHERE user_id IN (SELECT id FROM %s WHERE compliant = true)" % _q(pg.db_schema, "users") if pg.only_compliant else ""
+    ucl = (
+        " WHERE user_id IN (SELECT id FROM %s WHERE compliant = true)"
+        % _q(pg.db_schema, "users")
+        if pg.only_compliant
+        else ""
+    )
     out["user_settings"] = pd.read_sql(
-        text(f"SELECT user_id, content FROM {_q(pg.db_schema, 'user_settings')}{ucl}"), engine
+        text(f"SELECT user_id, content FROM {_q(pg.db_schema, 'user_settings')}{ucl}"),
+        engine,
     )
     return out
 
@@ -328,11 +380,15 @@ def fetch_tables(cfg: Config, engine=None, since=None, user_ids: Optional[list[s
 def _probe_recorded_at(engine, pg: PostgresConfig) -> pd.Series:
     from sqlalchemy import text
 
-    sql = text(f"SELECT recorded_at FROM {_q(pg.db_schema, 'glucose_entries')} LIMIT 2000")
+    sql = text(
+        f"SELECT recorded_at FROM {_q(pg.db_schema, 'glucose_entries')} LIMIT 2000"
+    )
     return pd.read_sql(sql, engine)["recorded_at"]
 
 
-def load_raw(cfg: Config, since=None, user_ids: Optional[list[str]] = None) -> pd.DataFrame:
+def load_raw(
+    cfg: Config, since=None, user_ids: Optional[list[str]] = None
+) -> pd.DataFrame:
     """Connect, fetch, and assemble the RAW frame (ready for ``align``)."""
     engine = connect(cfg)
     tables = fetch_tables(cfg, engine=engine, since=since, user_ids=user_ids)
@@ -355,11 +411,21 @@ def inspect(cfg: Config, engine=None) -> dict:
 
     counts = {}
     for name in [
-        "glucose_entries", "bolus_entries", "sport_measurements", "sport_trainings",
-        "sport_workouts", "events", "users", "user_settings", "pumps", "sensors",
+        "glucose_entries",
+        "bolus_entries",
+        "sport_measurements",
+        "sport_trainings",
+        "sport_workouts",
+        "events",
+        "users",
+        "user_settings",
+        "pumps",
+        "sensors",
     ]:
         try:
-            counts[name] = int(frame(f"SELECT count(*) c FROM {_q(pg.db_schema, name)}")["c"].iloc[0])
+            counts[name] = int(
+                frame(f"SELECT count(*) c FROM {_q(pg.db_schema, name)}")["c"].iloc[0]
+            )
         except Exception as exc:  # pragma: no cover - depends on live DB
             counts[name] = f"error: {exc}"
     report["row_counts"] = counts
@@ -367,13 +433,17 @@ def inspect(cfg: Config, engine=None) -> dict:
     ra = _probe_recorded_at(engine, pg)
     unit = detect_ts_unit(ra)
     report["ts_unit_detected"] = unit
-    rng = frame(f"SELECT min(recorded_at) lo, max(recorded_at) hi FROM {_q(pg.db_schema, 'glucose_entries')}")
+    rng = frame(
+        f"SELECT min(recorded_at) lo, max(recorded_at) hi FROM {_q(pg.db_schema, 'glucose_entries')}"
+    )
     report["glucose_time_range_utc"] = {
         "min": str(to_datetime_utc(rng["lo"], unit).iloc[0]),
         "max": str(to_datetime_utc(rng["hi"], unit).iloc[0]),
     }
 
-    gv = frame(f"SELECT value FROM {_q(pg.db_schema, 'glucose_entries')} LIMIT 5000")["value"]
+    gv = frame(f"SELECT value FROM {_q(pg.db_schema, 'glucose_entries')} LIMIT 5000")[
+        "value"
+    ]
     report["glucose_unit_detected"] = detect_glucose_unit(gv)
     report["glucose_value_stats"] = {
         "median": round(float(pd.to_numeric(gv).median()), 2),
@@ -384,19 +454,28 @@ def inspect(cfg: Config, engine=None) -> dict:
     cad = frame(
         f"SELECT recorded_at FROM {_q(pg.db_schema, 'glucose_entries')} ORDER BY recorded_at LIMIT 5000"
     )["recorded_at"]
-    diffs = to_datetime_utc(cad, unit).sort_values().diff().dropna().dt.total_seconds() / 60.0
-    report["cgm_cadence_min_median"] = round(float(diffs.median()), 2) if len(diffs) else None
+    diffs = (
+        to_datetime_utc(cad, unit).sort_values().diff().dropna().dt.total_seconds()
+        / 60.0
+    )
+    report["cgm_cadence_min_median"] = (
+        round(float(diffs.median()), 2) if len(diffs) else None
+    )
 
     for tbl, col in [("sport_measurements", "type"), ("events", "type")]:
         try:
-            vc = frame(f"SELECT {col}, count(*) c FROM {_q(pg.db_schema, tbl)} GROUP BY {col} ORDER BY c DESC LIMIT 40")
+            vc = frame(
+                f"SELECT {col}, count(*) c FROM {_q(pg.db_schema, tbl)} GROUP BY {col} ORDER BY c DESC LIMIT 40"
+            )
             report[f"{tbl}.{col}"] = dict(zip(vc[col].astype(str), vc["c"].astype(int)))
         except Exception as exc:  # pragma: no cover
             report[f"{tbl}.{col}"] = f"error: {exc}"
 
     for tbl, col in [("user_settings", "content"), ("events", "data")]:
         try:
-            s = frame(f"SELECT {col} FROM {_q(pg.db_schema, tbl)} LIMIT 3")[col].astype(str)
+            s = frame(f"SELECT {col} FROM {_q(pg.db_schema, tbl)} LIMIT 3")[col].astype(
+                str
+            )
             report[f"{tbl}.{col}_samples"] = [x[:300] for x in s.tolist()]
         except Exception as exc:  # pragma: no cover
             report[f"{tbl}.{col}_samples"] = f"error: {exc}"

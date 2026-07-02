@@ -46,6 +46,24 @@ def _decay_accumulate(
     )
 
 
+def _activity(
+    df: pd.DataFrame, col: str, tau_min: float, grid_min: int, length_min: int = 360
+) -> pd.Series:
+    """Causal activity signal: past doses convolved with t·exp(−t/τ) (peak at τ).
+
+    Unlike the IOB/COB *stock*, this is the *rate of action* now — the near-term
+    glucose pressure that drives the change over the next 30–60 min.
+    """
+    n = max(2, length_min // grid_min)
+    t = np.arange(n) * grid_min
+    ker = t * np.exp(-t / tau_min)
+    ker = ker / ker.sum() if ker.sum() > 0 else ker
+    x = df[col].fillna(0.0)
+    return x.groupby(df["user_id"], sort=False).transform(
+        lambda s: pd.Series(np.convolve(s.to_numpy(), ker)[: len(s)], index=s.index)
+    )
+
+
 def build_features(df: pd.DataFrame, cfg: Config) -> tuple[pd.DataFrame, list[str]]:
     """Return ``(df_with_features, feature_cols)``. Input is the aligned grid."""
     fc = cfg.features
@@ -83,13 +101,18 @@ def build_features(df: pd.DataFrame, cfg: Config) -> tuple[pd.DataFrame, list[st
     if _has_channel(df, "activity_flag"):
         df["time_since_activity"] = _time_since(df, "activity_flag")
         cols.append("time_since_activity")
+    if _has_channel(df, "insulin_u"):
+        df["_bolus_flag"] = df["insulin_u"].fillna(0.0) > 0
+        df["time_since_bolus"] = _time_since(df, "_bolus_flag")
+        cols.append("time_since_bolus")
 
     # --- circadian (from local wall-clock) ----------------------------------
     hour = df["ts_local"].dt.hour + df["ts_local"].dt.minute / 60.0
     df["hour_sin"] = np.sin(2 * np.pi * hour / 24.0)
     df["hour_cos"] = np.cos(2 * np.pi * hour / 24.0)
     df["is_weekend"] = (df["ts_local"].dt.dayofweek >= 5).astype(int)
-    cols += ["hour_sin", "hour_cos", "is_weekend"]
+    df["day_of_week"] = df["ts_local"].dt.dayofweek
+    cols += ["hour_sin", "hour_cos", "is_weekend", "day_of_week"]
 
     # --- activity / steps (trailing sums) -----------------------------------
     gs = df.groupby("user_id", sort=False)["steps"]
@@ -126,10 +149,22 @@ def build_features(df: pd.DataFrame, cfg: Config) -> tuple[pd.DataFrame, list[st
     if fc.use_therapy and _has_channel(df, "isf") and _has_channel(df, "icr"):
         csf = df["isf"] / df["icr"]
         if "cob" in df.columns:
-            df["cob_glucose"] = df["cob"] * csf        # expected mg/dL rise still on board
+            df["cob_glucose"] = df["cob"] * csf  # expected mg/dL rise still on board
             cols.append("cob_glucose")
         if "iob" in df.columns:
-            df["iob_glucose"] = df["iob"] * df["isf"]  # expected mg/dL drop still on board
+            df["iob_glucose"] = (
+                df["iob"] * df["isf"]
+            )  # expected mg/dL drop still on board
             cols.append("iob_glucose")
+        # Activity (rate of action) in glucose units — the near-term pressure that
+        # drives the *change*, which IOB/COB stock misses.
+        if _has_channel(df, "insulin_u"):
+            act = _activity(df, "insulin_u", fc.ins_activity_tau_min, grid)
+            df["ins_activity"] = act * df["isf"]
+            cols.append("ins_activity")
+        if _has_channel(df, "carbs_g"):
+            act = _activity(df, "carbs_g", fc.carb_activity_tau_min, grid)
+            df["carb_activity"] = act * csf
+            cols.append("carb_activity")
 
     return df, cols

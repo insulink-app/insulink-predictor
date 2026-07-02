@@ -131,7 +131,9 @@ def run_baseline_eval(
     return {"metrics": metrics, "error_grid": grids, "test": test, "ref_rmse": ref}
 
 
-def build_supervised(cfg: Config, df: pd.DataFrame | None = None) -> tuple[pd.DataFrame, list[str]]:
+def build_supervised(
+    cfg: Config, df: pd.DataFrame | None = None
+) -> tuple[pd.DataFrame, list[str]]:
     """Grid -> causal features -> supervised targets. Returns (frame, feature_cols)."""
     from ..features.build import build_features
 
@@ -141,7 +143,9 @@ def build_supervised(cfg: Config, df: pd.DataFrame | None = None) -> tuple[pd.Da
     return sup, feature_cols
 
 
-def run_lgbm_eval(cfg: Config, df: pd.DataFrame | None = None, write: bool = True) -> dict:
+def run_lgbm_eval(
+    cfg: Config, df: pd.DataFrame | None = None, write: bool = True
+) -> dict:
     """Phase 2 DoD: LightGBM vs persistence — must beat it (skill > 0) per horizon."""
     from ..models.lgbm import feature_importance, make_pred_fn, train_lgbm
 
@@ -166,8 +170,13 @@ def run_lgbm_eval(cfg: Config, df: pd.DataFrame | None = None, write: bool = Tru
         plot_feature_importance(fi, reports / "feature_importance.png")
         error_grid_table(test, cfg, pred_fn, "lgbm", plot=True)
         with mlflow_run(cfg, "lgbm") as log:
-            log.params({"model": "lgbm", "n_features": len(feature_cols),
-                        "test_fraction": cfg.split.test_fraction})
+            log.params(
+                {
+                    "model": "lgbm",
+                    "n_features": len(feature_cols),
+                    "test_fraction": cfg.split.test_fraction,
+                }
+            )
             for _, r in lgbm_m.iterrows():
                 hm = int(r["horizon_min"])
                 log.metrics({f"rmse_h{hm}": r["rmse"], f"skill_h{hm}": r["skill"]})
@@ -185,7 +194,9 @@ def run_lgbm_eval(cfg: Config, df: pd.DataFrame | None = None, write: bool = Tru
     }
 
 
-def subset_skill(test: pd.DataFrame, cfg: Config, pred_fn: PredFn, mask: np.ndarray) -> pd.DataFrame:
+def subset_skill(
+    test: pd.DataFrame, cfg: Config, pred_fn: PredFn, mask: np.ndarray
+) -> pd.DataFrame:
     """Skill of a model vs persistence, restricted to ``mask`` rows.
 
     Crucially the persistence denominator is recomputed **on the same subset** —
@@ -210,7 +221,9 @@ def subset_skill(test: pd.DataFrame, cfg: Config, pred_fn: PredFn, mask: np.ndar
     return pd.DataFrame(rows)
 
 
-def _curve_examples(test, curve_models, feature_cols, cfg, max_step=None, n=3, at=None) -> list[dict]:
+def _curve_examples(
+    test, curve_models, feature_cols, cfg, max_step=None, n=3, at=None
+) -> list[dict]:
     """Forecast trajectories with a fully-observed future.
 
     Selection: post-meal events by default, or the bucket nearest ``at`` (a
@@ -224,7 +237,9 @@ def _curve_examples(test, curve_models, feature_cols, cfg, max_step=None, n=3, a
 
     if at is not None:
         at_ts = pd.Timestamp(at)
-        at_ts = at_ts.tz_localize("UTC") if at_ts.tz is None else at_ts.tz_convert("UTC")
+        at_ts = (
+            at_ts.tz_localize("UTC") if at_ts.tz is None else at_ts.tz_convert("UTC")
+        )
         cand = test[has_future]
         if cand.empty:
             return []
@@ -241,11 +256,15 @@ def _curve_examples(test, curve_models, feature_cols, cfg, max_step=None, n=3, a
     examples = []
     for j in picks:
         row = test.iloc[[j]]
-        pred = forecast_curve(row, curve_models, feature_cols, cfg.features.predict_delta)[0][:max_step]
+        pred = forecast_curve(
+            row, curve_models, feature_cols, cfg.features.predict_delta
+        )[0][:max_step]
         actual = [float(test.iloc[j][f"cy_{k}"]) for k in range(1, max_step + 1)]
         ts = pd.Timestamp(test.iloc[j]["ts_local"]).strftime("%a %d.%m %H:%M")
         tag = "meal" if bool(test.iloc[j].get("event_meal", False)) else "t"
-        uid_short = str(test.iloc[j]["user_id"])[:8]  # keep titles short so they don't overlap
+        uid_short = str(test.iloc[j]["user_id"])[
+            :8
+        ]  # keep titles short so they don't overlap
         examples.append(
             {
                 "title": f"{uid_short}… · {tag} @ {ts}",
@@ -266,7 +285,9 @@ def _curve_metrics(test, cfg, curve_models, feature_cols, max_step) -> pd.DataFr
     """
     from ..models.events import forecast_curve
 
-    yhat = forecast_curve(test, curve_models, feature_cols, cfg.features.predict_delta)[:, max_step - 1]
+    yhat = forecast_curve(test, curve_models, feature_cols, cfg.features.predict_delta)[
+        :, max_step - 1
+    ]
     yt = test[f"cy_{max_step}"].to_numpy()
     g_t = test["glucose_mgdl"].to_numpy()  # persistence prediction
     valid = test[f"cvalid_{max_step}"].to_numpy()
@@ -292,7 +313,9 @@ def _curve_metrics(test, cfg, curve_models, feature_cols, max_step) -> pd.DataFr
     return pd.DataFrame(rows)
 
 
-def run_curve(cfg, df=None, horizon_min=60, n=3, at=None, out=None, metrics=False) -> dict:
+def run_curve(
+    cfg, df=None, horizon_min=60, n=3, at=None, out=None, metrics=False
+) -> dict:
     """Train curve models on the early data and plot forecast trajectories.
 
     Forecasts are out-of-sample: the chronological tail (test split) is where the
@@ -308,21 +331,46 @@ def run_curve(cfg, df=None, horizon_min=60, n=3, at=None, out=None, metrics=Fals
 
     train, test = chronological_split(sup, cfg.split.test_fraction)
     if train[f"cvalid_{max_step}"].sum() < 50 or len(test) <= max_step:
-        return {"examples": [], "n_train": len(train), "n_test": len(test), "out": None,
-                "metrics": None, "reason": "not enough data to train/forecast this range"}
+        return {
+            "examples": [],
+            "n_train": len(train),
+            "n_test": len(test),
+            "out": None,
+            "metrics": None,
+            "reason": "not enough data to train/forecast this range",
+        }
 
-    curve_models = train_curve_models(train, feature_cols, max_step, cfg.features.predict_delta)
-    examples = _curve_examples(test, curve_models, feature_cols, cfg, max_step=max_step, n=n, at=at)
+    curve_models = train_curve_models(
+        train, feature_cols, max_step, cfg.features.predict_delta
+    )
+    examples = _curve_examples(
+        test, curve_models, feature_cols, cfg, max_step=max_step, n=n, at=at
+    )
 
-    out = Path(out) if out else Path(cfg.paths.reports_dir) / f"curves_{horizon_min}min.png"
+    out = (
+        Path(out)
+        if out
+        else Path(cfg.paths.reports_dir) / f"curves_{horizon_min}min.png"
+    )
     if examples:
         plot_curves(examples, out)
-    metrics_df = _curve_metrics(test, cfg, curve_models, feature_cols, max_step) if metrics else None
-    return {"examples": examples, "n_train": int(len(train)), "n_test": int(len(test)),
-            "out": out, "metrics": metrics_df}
+    metrics_df = (
+        _curve_metrics(test, cfg, curve_models, feature_cols, max_step)
+        if metrics
+        else None
+    )
+    return {
+        "examples": examples,
+        "n_train": int(len(train)),
+        "n_test": int(len(test)),
+        "out": out,
+        "metrics": metrics_df,
+    }
 
 
-def run_event_eval(cfg: Config, df: pd.DataFrame | None = None, write: bool = True) -> dict:
+def run_event_eval(
+    cfg: Config, df: pd.DataFrame | None = None, write: bool = True
+) -> dict:
     """Phase 3 DoD: post-meal skill must exceed the global skill; plot the curve."""
     from ..models.events import build_curve_targets, detect_events, train_curve_models
     from ..models.lgbm import make_pred_fn
@@ -333,8 +381,12 @@ def run_event_eval(cfg: Config, df: pd.DataFrame | None = None, write: bool = Tr
     sup = detect_events(sup, cfg)
 
     train, test = chronological_split(sup, cfg.split.test_fraction)
-    curve_models = train_curve_models(train, feature_cols, max_step, cfg.features.predict_delta)
-    pred_fn = make_pred_fn(curve_models, feature_cols, cfg.features.predict_delta)  # keyed by step
+    curve_models = train_curve_models(
+        train, feature_cols, max_step, cfg.features.predict_delta
+    )
+    pred_fn = make_pred_fn(
+        curve_models, feature_cols, cfg.features.predict_delta
+    )  # keyed by step
 
     tsm = test["time_since_meal"].to_numpy()
     post_meal = np.isfinite(tsm) & (tsm <= cfg.event.post_event_window_min)
@@ -354,9 +406,16 @@ def run_event_eval(cfg: Config, df: pd.DataFrame | None = None, write: bool = Tr
         if examples:
             plot_curves(examples, reports / "event_curves.png")
         with mlflow_run(cfg, "events") as log:
-            log.params({"model": "lgbm-curve", "post_event_window_min": cfg.event.post_event_window_min})
+            log.params(
+                {
+                    "model": "lgbm-curve",
+                    "post_event_window_min": cfg.event.post_event_window_min,
+                }
+            )
             for _, r in comparison.iterrows():
-                log.metrics({f"skill_{r['window']}_h{int(r['horizon_min'])}": r["skill"]})
+                log.metrics(
+                    {f"skill_{r['window']}_h{int(r['horizon_min'])}": r["skill"]}
+                )
 
     return {
         "comparison": comparison,
@@ -369,7 +428,9 @@ def run_event_eval(cfg: Config, df: pd.DataFrame | None = None, write: bool = Tr
     }
 
 
-def per_user_skill(test: pd.DataFrame, cfg: Config, pred_fn: PredFn, model_name: str) -> pd.DataFrame:
+def per_user_skill(
+    test: pd.DataFrame, cfg: Config, pred_fn: PredFn, model_name: str
+) -> pd.DataFrame:
     """Per-user, per-horizon RMSE and skill vs persistence."""
     rows = []
     for uid, gdf in test.groupby("user_id"):
@@ -392,7 +453,9 @@ def per_user_skill(test: pd.DataFrame, cfg: Config, pred_fn: PredFn, model_name:
     return pd.DataFrame(rows)
 
 
-def run_personalize_eval(cfg: Config, df: pd.DataFrame | None = None, write: bool = True) -> dict:
+def run_personalize_eval(
+    cfg: Config, df: pd.DataFrame | None = None, write: bool = True
+) -> dict:
     """Phase 4 DoD: personalized beats global per-user; cold-start degrades gracefully."""
     from ..models.personalize import (
         PersonalizedModel,
@@ -416,12 +479,20 @@ def run_personalize_eval(cfg: Config, df: pd.DataFrame | None = None, write: boo
     train_c = add_static(train, static)
     cond_models = train_per_horizon(train_c, feature_cols + scols, cfg)
     residual_models = train_residuals(train_c, cond_models, feature_cols, scols, cfg)
-    personalized = PersonalizedModel(cond_models, residual_models, feature_cols, scols, static,
-                                     predict_delta=cfg.features.predict_delta)
+    personalized = PersonalizedModel(
+        cond_models,
+        residual_models,
+        feature_cols,
+        scols,
+        static,
+        predict_delta=cfg.features.predict_delta,
+    )
 
     def global_pred(d, h):
         pred = global_models[h].predict(d[feature_cols])
-        return pred + d["glucose_mgdl"].to_numpy() if cfg.features.predict_delta else pred
+        return (
+            pred + d["glucose_mgdl"].to_numpy() if cfg.features.predict_delta else pred
+        )
 
     gu = per_user_skill(test, cfg, global_pred, "global")
     pu = per_user_skill(test, cfg, personalized.predict, "personalized")
@@ -445,7 +516,9 @@ def run_personalize_eval(cfg: Config, df: pd.DataFrame | None = None, write: boo
     summary = pd.DataFrame(rows)
 
     # cold-start: personalized pipeline must run on held-out users without crashing
-    coldstart = {"n_heldout_users": int(heldout["user_id"].nunique()) if len(heldout) else 0}
+    coldstart = {
+        "n_heldout_users": int(heldout["user_id"].nunique()) if len(heldout) else 0
+    }
     if len(heldout) > 0:
         finite_ok = True
         for h in cfg.horizons_steps:
@@ -453,7 +526,9 @@ def run_personalize_eval(cfg: Config, df: pd.DataFrame | None = None, write: boo
             preds = personalized.predict(heldout, h)
             finite_ok &= bool(np.isfinite(preds[valid]).all())
             # cold-start users have no residual model -> base only
-            assert all(uid not in residual_models[h] for uid in heldout["user_id"].unique())
+            assert all(
+                uid not in residual_models[h] for uid in heldout["user_id"].unique()
+            )
         coldstart["graceful"] = finite_ok
 
     if write:
@@ -461,7 +536,9 @@ def run_personalize_eval(cfg: Config, df: pd.DataFrame | None = None, write: boo
         write_table(summary, reports / "personalization_summary.csv")
         write_table(per_user, reports / "personalization_per_user.csv")
         with mlflow_run(cfg, "personalize") as log:
-            log.params({"min_residual_rows": 200, "heldout": ",".join(cfg.split.heldout_users)})
+            log.params(
+                {"min_residual_rows": 200, "heldout": ",".join(cfg.split.heldout_users)}
+            )
             for _, r in summary.iterrows():
                 hm = int(r["horizon_min"])
                 log.metrics(
