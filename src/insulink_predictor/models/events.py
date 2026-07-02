@@ -92,7 +92,9 @@ def _make_quantile_regressor(alpha: float):
     return reg
 
 
-def train_quantile_curve_models(train, feature_cols, max_step, quantiles, predict_delta=True) -> dict:
+def train_quantile_curve_models(
+    train, feature_cols, max_step, quantiles, predict_delta=True
+) -> dict:
     """Train per-step quantile models for each level → {quantile: {step: model}}.
 
     Quantiles of the *change* over persistence, so the band widens exactly where
@@ -111,6 +113,11 @@ def train_quantile_curve_models(train, feature_cols, max_step, quantiles, predic
     return models
 
 
-def forecast_curve_quantiles(df, qmodels: dict, feature_cols, predict_delta=True) -> dict:
+def forecast_curve_quantiles(
+    df, qmodels: dict, feature_cols, predict_delta=True
+) -> dict:
     """Per-quantile trajectories → {quantile: array (n_rows, max_step)} (absolute mg/dL)."""
-    return {q: forecast_curve(df, m, feature_cols, predict_delta) for q, m in qmodels.items()}
+    return {
+        q: forecast_curve(df, m, feature_cols, predict_delta)
+        for q, m in qmodels.items()
+    }

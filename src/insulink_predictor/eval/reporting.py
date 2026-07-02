@@ -80,8 +80,11 @@ def plot_curves(examples: list[dict], path: str | Path) -> Path:
         if "lower" in ex and "upper" in ex:
             lo, hi = ex.get("band", (0.1, 0.9))
             ax.fill_between(
-                m, [ex["g0"], *ex["lower"]], [ex["g0"], *ex["upper"]],
-                color="#d8543b", alpha=0.18,
+                m,
+                [ex["g0"], *ex["lower"]],
+                [ex["g0"], *ex["upper"]],
+                color="#d8543b",
+                alpha=0.18,
                 label=f"{int(lo * 100)}–{int(hi * 100)}% band",
             )
         ax.plot(m, [ex["g0"], *ex["actual"]], "o-", color="#222", label="actual", ms=3)
@@ -98,7 +101,11 @@ def plot_curves(examples: list[dict], path: str | Path) -> Path:
         ax.set_xlabel("minutes ahead")
         ax.set_ylabel("glucose (mg/dL)")
         ax.legend(fontsize=7)
-    subtitle = "median + uncertainty band vs actual" if banded else "predicted vs actual vs persistence"
+    subtitle = (
+        "median + uncertainty band vs actual"
+        if banded
+        else "predicted vs actual vs persistence"
+    )
     fig.suptitle(f"{horizon}-min glucose forecast — {subtitle}", fontsize=11)
     fig.savefig(path, dpi=120)
     plt.close(fig)

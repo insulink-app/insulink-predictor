@@ -157,5 +157,7 @@ def train_residuals(train_c, cond_models, feature_cols, static_cols, cfg) -> dic
             yv, basev = val[f"y_{h}"].to_numpy(), val["_base"].to_numpy()
             if _rmse(yv, basev + trial.predict(val[feature_cols])) < _rmse(yv, basev):
                 # helps on the user's own holdout → refit on all their data
-                residual_models[h][uid] = _small_regressor().fit(g[feature_cols], g["_resid"])
+                residual_models[h][uid] = _small_regressor().fit(
+                    g[feature_cols], g["_resid"]
+                )
     return residual_models

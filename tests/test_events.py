@@ -64,9 +64,9 @@ def test_curve_band_brackets_median():
         lower = np.array(ex["lower"])
         upper = np.array(ex["upper"])
         pred = np.array(ex["predicted"])  # median
-        assert (lower <= upper + 1e-6).all()              # no quantile crossing
+        assert (lower <= upper + 1e-6).all()  # no quantile crossing
         assert (lower <= pred + 1e-6).all() and (pred <= upper + 1e-6).all()
-        assert (upper - lower).mean() > 0                 # band has real width
+        assert (upper - lower).mean() > 0  # band has real width
 
 
 def test_detect_events_flags_meals():

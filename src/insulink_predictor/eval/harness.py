@@ -263,7 +263,9 @@ def _curve_examples(
         actual = [float(test.iloc[j][f"cy_{k}"]) for k in range(1, max_step + 1)]
         ts = pd.Timestamp(test.iloc[j]["ts_local"]).strftime("%a %d.%m %H:%M")
         tag = "meal" if bool(test.iloc[j].get("event_meal", False)) else "t"
-        uid_short = str(test.iloc[j]["user_id"])[:8]  # short titles so they don't overlap
+        uid_short = str(test.iloc[j]["user_id"])[
+            :8
+        ]  # short titles so they don't overlap
         ex = {
             "title": f"{uid_short}… · {tag} @ {ts}",
             "g0": float(test.iloc[j]["glucose_mgdl"]),
@@ -272,13 +274,18 @@ def _curve_examples(
             "actual": actual,
         }
         if qmodels is not None:
-            qf = {q: forecast_curve(row, m, feature_cols, delta)[0][:max_step] for q, m in qmodels.items()}
+            qf = {
+                q: forecast_curve(row, m, feature_cols, delta)[0][:max_step]
+                for q, m in qmodels.items()
+            }
             # sort across quantiles per step to prevent crossing
             stacked = np.sort(np.vstack([qf[q] for q in sorted(qf)]), axis=0)
             ex["lower"] = [float(x) for x in stacked[0]]
             ex["upper"] = [float(x) for x in stacked[-1]]
             if 0.5 in qmodels:
-                ex["predicted"] = [float(x) for x in qf[0.5]]  # median is the central line
+                ex["predicted"] = [
+                    float(x) for x in qf[0.5]
+                ]  # median is the central line
             ex["band"] = (q_lo, q_hi)
         examples.append(ex)
     return examples
@@ -321,7 +328,16 @@ def _curve_metrics(test, cfg, curve_models, feature_cols, max_step) -> pd.DataFr
 
 
 def run_curve(
-    cfg, df=None, horizon_min=60, n=3, at=None, out=None, metrics=False, band=False, lo=0.1, hi=0.9
+    cfg,
+    df=None,
+    horizon_min=60,
+    n=3,
+    at=None,
+    out=None,
+    metrics=False,
+    band=False,
+    lo=0.1,
+    hi=0.9,
 ) -> dict:
     """Train curve models on the early data and plot forecast trajectories.
 
@@ -364,7 +380,14 @@ def run_curve(
         else None
     )
     examples = _curve_examples(
-        test, curve_models, feature_cols, cfg, max_step=max_step, n=n, at=at, qmodels=qmodels
+        test,
+        curve_models,
+        feature_cols,
+        cfg,
+        max_step=max_step,
+        n=n,
+        at=at,
+        qmodels=qmodels,
     )
 
     out = (
