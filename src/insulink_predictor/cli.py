@@ -92,6 +92,7 @@ def curve(
     horizon_min: int = typer.Option(60, help="Forecast horizon in minutes (e.g. 30)."),
     n: int = typer.Option(3, help="Number of example curves (ignored when --at is set)."),
     at: Optional[str] = typer.Option(None, help="Forecast from the bucket nearest this timestamp."),
+    metrics: bool = typer.Option(False, "--metrics", help="Also print skill/RMSE vs persistence for the window."),
     out: Optional[Path] = typer.Option(None, help="Output PNG (default: reports/curves_<h>min.png)."),
 ) -> None:
     """Plot forecast trajectories (0..horizon min) for a user / DB time range.
@@ -123,7 +124,11 @@ def curve(
     if user:
         grid = grid[grid["user_id"] == user]
 
-    res = run_curve(cfg, df=grid, horizon_min=horizon_min, n=n, at=at, out=out)
+    res = run_curve(cfg, df=grid, horizon_min=horizon_min, n=n, at=at, out=out, metrics=metrics)
+    if res.get("metrics") is not None and not res["metrics"].empty:
+        typer.echo(f"Forecast window skill vs persistence @ {horizon_min} min (out-of-sample tail):")
+        typer.echo(res["metrics"].to_string(index=False))
+        typer.echo("")
     if not res["examples"]:
         typer.echo(
             f"curve: nothing to plot ({res.get('reason', 'no meal event / --at with full future')}); "

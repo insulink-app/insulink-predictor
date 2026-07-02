@@ -258,11 +258,46 @@ def _curve_examples(test, curve_models, feature_cols, cfg, max_step=None, n=3, a
     return examples
 
 
-def run_curve(cfg, df=None, horizon_min=60, n=3, at=None, out=None) -> dict:
+def _curve_metrics(test, cfg, curve_models, feature_cols, max_step) -> pd.DataFrame:
+    """Skill/RMSE vs persistence over the forecast window, at the curve horizon.
+
+    Reported over all out-of-sample rows and, separately, over post-meal rows
+    (where the plotted curves anchor and persistence fails hardest).
+    """
+    from ..models.events import forecast_curve
+
+    yhat = forecast_curve(test, curve_models, feature_cols)[:, max_step - 1]
+    yt = test[f"cy_{max_step}"].to_numpy()
+    g_t = test["glucose_mgdl"].to_numpy()  # persistence prediction
+    valid = test[f"cvalid_{max_step}"].to_numpy()
+    tsm = test["time_since_meal"].to_numpy()
+    post = valid & np.isfinite(tsm) & (tsm <= cfg.event.post_event_window_min)
+
+    rows = []
+    for name, mask in (("all", valid), ("post_meal", post)):
+        if mask.sum() == 0:
+            continue
+        r_m = rmse(yt[mask], yhat[mask])
+        r_p = rmse(yt[mask], g_t[mask])
+        rows.append(
+            {
+                "window": name,
+                "horizon_min": max_step * cfg.grid_minutes,
+                "n": int(mask.sum()),
+                "rmse": round(r_m, 2),
+                "rmse_persistence": round(r_p, 2),
+                "skill": round(skill_score(r_m, r_p), 4),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def run_curve(cfg, df=None, horizon_min=60, n=3, at=None, out=None, metrics=False) -> dict:
     """Train curve models on the early data and plot forecast trajectories.
 
     Forecasts are out-of-sample: the chronological tail (test split) is where the
-    curves are drawn, after training on the earlier portion.
+    curves are drawn, after training on the earlier portion. With ``metrics``, also
+    score the whole forecast window vs persistence at the horizon.
     """
     from ..models.events import build_curve_targets, detect_events, train_curve_models
 
@@ -274,7 +309,7 @@ def run_curve(cfg, df=None, horizon_min=60, n=3, at=None, out=None) -> dict:
     train, test = chronological_split(sup, cfg.split.test_fraction)
     if train[f"cvalid_{max_step}"].sum() < 50 or len(test) <= max_step:
         return {"examples": [], "n_train": len(train), "n_test": len(test), "out": None,
-                "reason": "not enough data to train/forecast this range"}
+                "metrics": None, "reason": "not enough data to train/forecast this range"}
 
     curve_models = train_curve_models(train, feature_cols, max_step)
     examples = _curve_examples(test, curve_models, feature_cols, cfg, max_step=max_step, n=n, at=at)
@@ -282,7 +317,9 @@ def run_curve(cfg, df=None, horizon_min=60, n=3, at=None, out=None) -> dict:
     out = Path(out) if out else Path(cfg.paths.reports_dir) / f"curves_{horizon_min}min.png"
     if examples:
         plot_curves(examples, out)
-    return {"examples": examples, "n_train": int(len(train)), "n_test": int(len(test)), "out": out}
+    metrics_df = _curve_metrics(test, cfg, curve_models, feature_cols, max_step) if metrics else None
+    return {"examples": examples, "n_train": int(len(train)), "n_test": int(len(test)),
+            "out": out, "metrics": metrics_df}
 
 
 def run_event_eval(cfg: Config, df: pd.DataFrame | None = None, write: bool = True) -> dict:
