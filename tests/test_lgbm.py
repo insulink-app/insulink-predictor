@@ -49,6 +49,16 @@ def test_context_features_drive_delta_and_weather_is_not_top(lgbm_result):
         "ins_activity",
         "time_since_bolus",
         "accel",
+        # horizon-specific physiological forecast: the expected mg/dL change over
+        # the next h min from carbs/insulin on board — directly targets the delta,
+        # so it is expected to rank at or near the top.
+        "carb_delta_6",
+        "carb_delta_12",
+        "ins_delta_6",
+        "ins_delta_12",
+        # per-user circadian baseline / deviation
+        "tod_baseline",
+        "tod_dev",
     }
     assert fi.index[0] in drivers, f"top feature {fi.index[0]} not an expected driver"
     assert "weather_now" not in set(fi.index[:3])  # measured, not believed (§3)

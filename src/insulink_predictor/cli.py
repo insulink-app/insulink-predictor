@@ -118,14 +118,22 @@ def curve(
     ),
     lo: float = typer.Option(0.1, help="Lower band quantile (e.g. 0.1)."),
     hi: float = typer.Option(0.9, help="Upper band quantile (e.g. 0.9)."),
+    model: str = typer.Option(
+        "lgbm", "--model", help="Curve learner: 'lgbm' or 'knn'."
+    ),
+    knn_k: int = typer.Option(
+        100, "--knn-k", help="Neighbors when --model knn (band is empirical)."
+    ),
     out: Optional[Path] = typer.Option(
-        None, help="Output PNG (default: reports/curves_<h>min.png)."
+        None, help="Output PNG (default: reports/curves_<h>min[_<model>].png)."
     ),
 ) -> None:
     """Plot forecast trajectories (0..horizon min) for a user / DB time range.
 
     Trains curve models on the earlier data and draws out-of-sample forecasts on
-    the chronological tail (predicted vs actual vs persistence).
+    the chronological tail (predicted vs actual vs persistence). ``--model knn``
+    swaps the per-step LightGBM for k-NN (its band is the empirical spread of the
+    neighbor set, not separately-trained quantile models).
     """
     import pandas as pd
 
@@ -162,6 +170,8 @@ def curve(
         band=band,
         lo=lo,
         hi=hi,
+        model=model,
+        knn_k=knn_k,
     )
     if res.get("metrics") is not None and not res["metrics"].empty:
         typer.echo(
@@ -269,6 +279,76 @@ def _run_eval(config: Path) -> None:
     verdict = "PASS" if all(v > 0 for v in skills.values()) else "FAIL"
     typer.echo(f"\nLGBM skill vs persistence: {skills}  ->  {verdict} (need > 0 each)")
     typer.echo(f"Reports + feature importance written to {cfg.paths.reports_dir}/")
+
+
+@app.command()
+def compare(
+    config: Path = typer.Option(
+        Path("config/config.yaml"), help="Path to config.yaml."
+    ),
+    k: int = typer.Option(100, help="Number of neighbors for k-NN."),
+) -> None:
+    """Compare persistence vs LGBM vs k-NN on identical features/split/target."""
+    from .eval.harness import run_model_comparison
+
+    cfg = load_config(config)
+    res = run_model_comparison(cfg, k=k, write=True)
+    typer.echo(
+        "Model comparison (test split) — same features, same chronological split, "
+        "same delta target:"
+    )
+    typer.echo(res["comparison"].to_string(index=False))
+    typer.echo(f"\nBest skill per horizon: {res['winners']}")
+    typer.echo(f"Report written to {cfg.paths.reports_dir}/model_comparison_knn.csv")
+
+
+@app.command()
+def backtest(
+    config: Path = typer.Option(
+        Path("config/config.yaml"), help="Path to config.yaml."
+    ),
+    source: str = typer.Option(
+        "synth", help="Data source: 'synth' or 'db' (PostgreSQL)."
+    ),
+    user: Optional[str] = typer.Option(None, help="Restrict to a single user_id (db)."),
+    since: Optional[str] = typer.Option(
+        None, help="Only rows on/after this date, e.g. 2026-04-01 (db)."
+    ),
+    folds: int = typer.Option(5, help="Number of rolling-origin (expanding) folds."),
+    test_span: float = typer.Option(
+        0.5, help="Fraction of each user's tail tiled into the test folds."
+    ),
+) -> None:
+    """Walk-forward skill with error bars — the trustworthy number (mean ± std).
+
+    Trains the direct multi-horizon model on several expanding chronological folds
+    (per user, embargoed) and reports skill mean ± std and the worst fold vs
+    persistence. A single 80/20 split (``gf eval``) hides this fold-to-fold noise.
+    With ``--source db`` the folds run on real data (credentials from env).
+    """
+    from .eval.backtest import run_backtest
+
+    cfg = load_config(config)
+    grid = None
+    if source == "db":
+        from .data.align import align
+        from .data.load import load_raw
+
+        raw = load_raw(cfg, since=since, user_ids=[user] if user else None)
+        if raw.empty:
+            typer.echo("backtest: no rows returned (check DATABASE_URL / filters).")
+            raise typer.Exit(code=1)
+        grid = align(raw, cfg)
+
+    res = run_backtest(cfg, df=grid, n_folds=folds, test_span=test_span, write=True)
+    typer.echo(
+        f"Walk-forward skill vs persistence ({source}, {folds} folds, expanding):"
+    )
+    typer.echo(res["summary"].to_string(index=False))
+    s = res["summary"]
+    verdict = "PASS" if (s["worst"] > 0).all() else "FAIL"
+    typer.echo(f"\nBeats persistence on every fold & horizon? {verdict}")
+    typer.echo(f"Reports written to {cfg.paths.reports_dir}/backtest_*.csv")
 
 
 @app.command(name="train-events")
