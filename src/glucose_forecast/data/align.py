@@ -21,10 +21,14 @@ def _align_user(sub: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     freq = cfg.grid_freq
 
     # per-user local offset, recovered from raw (ts_local is naive wall-clock)
-    offset = sub["ts_local"].iloc[0] - sub["ts_utc"].iloc[0].tz_convert("UTC").tz_localize(None)
+    offset = sub["ts_local"].iloc[0] - sub["ts_utc"].iloc[0].tz_convert(
+        "UTC"
+    ).tz_localize(None)
 
-    # bucket each reading to the grid, then reindex onto the full regular grid
-    bucket = sub["ts_utc"].dt.floor(freq)
+    # Bucket each reading to the *nearest* grid point (not floor): CGM timestamps
+    # drift ±jitter around the nominal cadence, so rounding keeps a reading in its
+    # intended bucket instead of spilling into the previous one.
+    bucket = sub["ts_utc"].dt.round(freq)
     grid = pd.date_range(bucket.min(), bucket.max(), freq=freq, tz="UTC")
 
     g = sub.assign(_bucket=bucket).groupby("_bucket")
@@ -59,11 +63,13 @@ def _align_user(sub: pd.DataFrame, cfg: Config) -> pd.DataFrame:
             "ts_utc": grid,
             "ts_local": (grid.tz_localize(None) + offset),
             "glucose_mgdl": glucose.to_numpy(),
-            "meal_flag": agg["meal_flag"].fillna(False).astype(bool).to_numpy(),
+            # empty buckets reindex to NaN in the (object) bool cols; .eq(True)
+            # maps NaN→False without the deprecated fillna-downcast path.
+            "meal_flag": agg["meal_flag"].eq(True).to_numpy(),
             "carbs_g": agg["carbs_g"].to_numpy(),
             "insulin_u": agg["insulin_u"].to_numpy(),
             "steps": agg["steps"].fillna(0).round().astype("int64").to_numpy(),
-            "activity_flag": agg["activity_flag"].fillna(False).astype(bool).to_numpy(),
+            "activity_flag": agg["activity_flag"].eq(True).to_numpy(),
             "hr": agg["hr"].to_numpy(),
             "weather_temp": agg["weather_temp"].to_numpy(),
             "sensor_gap": sensor_gap.to_numpy(),

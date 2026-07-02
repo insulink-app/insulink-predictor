@@ -22,7 +22,9 @@ _START = pd.Timestamp("2025-01-06 00:00:00", tz="UTC")
 _KERNEL_MIN = 240  # 4h support for meal / insulin / activity response kernels
 
 
-def _biexp_kernel(rise_tau: float, decay_tau: float, length: int = _KERNEL_MIN) -> np.ndarray:
+def _biexp_kernel(
+    rise_tau: float, decay_tau: float, length: int = _KERNEL_MIN
+) -> np.ndarray:
     """Normalized difference-of-exponentials, peak scaled to 1.0."""
     t = np.arange(length)
     k = np.exp(-t / decay_tau) - np.exp(-t / rise_tau)
@@ -44,7 +46,7 @@ def _simulate_user(user_idx: int, cfg: Config) -> pd.DataFrame:
     basal = rng.uniform(95, 130)
     circ_amp = rng.uniform(8, 18)
     meal_amp_scale = rng.uniform(0.8, 1.4)
-    meal_gain = rng.uniform(0.4, 0.7)          # mg/dL per gram of carbs at peak
+    meal_gain = rng.uniform(0.4, 0.7)  # mg/dL per gram of carbs at peak
     rise_tau = rng.uniform(15, 25)
     decay_tau = rng.uniform(80, 110)
     noise_sd = rng.uniform(2.0, 5.0)
@@ -59,11 +61,13 @@ def _simulate_user(user_idx: int, cfg: Config) -> pd.DataFrame:
 
     steps = np.zeros(n_min)
     hr = 65.0 + rng.normal(0, 2, n_min)
-    meal_min = np.zeros(n_min)          # carbs logged at that minute
-    insulin_min = np.zeros(n_min)       # units logged at that minute
+    meal_min = np.zeros(n_min)  # carbs logged at that minute
+    insulin_min = np.zeros(n_min)  # units logged at that minute
     activity_min = np.zeros(n_min, dtype=bool)
 
-    def _add_kernel(dst: np.ndarray, start: int, amp: float, kernel: np.ndarray, sign: float = 1.0):
+    def _add_kernel(
+        dst: np.ndarray, start: int, amp: float, kernel: np.ndarray, sign: float = 1.0
+    ):
         end = min(n_min, start + kernel.size)
         if start < 0 or end <= start:
             return
@@ -81,9 +85,11 @@ def _simulate_user(user_idx: int, cfg: Config) -> pd.DataFrame:
             meal_min[m0] = carbs
             _add_kernel(signal, m0, meal_gain * carbs * meal_amp_scale, meal_kernel)
             if has_insulin:
-                dose = carbs / 10.0 * rng.uniform(0.8, 1.2)   # rough carb ratio
+                dose = carbs / 10.0 * rng.uniform(0.8, 1.2)  # rough carb ratio
                 insulin_min[m0] = dose
-                _add_kernel(signal, m0, dose * rng.uniform(2.5, 3.5), insulin_kernel, sign=-1.0)
+                _add_kernel(
+                    signal, m0, dose * rng.uniform(2.5, 3.5), insulin_kernel, sign=-1.0
+                )
         # activity bouts: steps + HR up, glucose dips
         for _ in range(rng.poisson(1.2)):
             local_hour = float(rng.uniform(7, 21))
@@ -104,9 +110,9 @@ def _simulate_user(user_idx: int, cfg: Config) -> pd.DataFrame:
 
     # --- sample irregular CGM readings -------------------------------------
     base_read = np.arange(0, n_min, cfg.grid_minutes)
-    jitter = rng.integers(-1, 2, size=base_read.size)          # ±1 min timestamp jitter
+    jitter = rng.integers(-1, 2, size=base_read.size)  # ±1 min timestamp jitter
     read = np.clip(base_read + jitter, 0, n_min - 1)
-    keep = rng.random(read.size) > s.dropout_prob              # random dropouts
+    keep = rng.random(read.size) > s.dropout_prob  # random dropouts
     # larger contiguous sensor gaps
     gap_mask = np.ones(n_min, dtype=bool)
     for _ in range(rng.poisson(s.gap_events_per_day * s.days)):

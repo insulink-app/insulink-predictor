@@ -50,7 +50,7 @@ GRID_SCHEMA = pa.DataFrameSchema(
         _glucose_nan_only_in_gap,
         error="glucose_mgdl may be NaN only where sensor_gap is True",
     ),
-    strict=False,   # tolerate extra derived columns
+    strict=False,  # tolerate extra derived columns
     coerce=True,
     ordered=False,
 )

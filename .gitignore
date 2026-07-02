@@ -8,3 +8,12 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Data (raw/interim/processed) — never committed (ROADMAP §2)
+data/
+
+# Experiment tracking
+mlruns/
+
+# OS / editor
+.DS_Store
