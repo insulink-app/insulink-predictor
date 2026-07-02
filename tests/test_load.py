@@ -101,8 +101,8 @@ def test_assemble_raw_produces_contract_columns():
     assert required.issubset(raw.columns)
     assert raw["ts_utc"].dt.tz is not None            # tz-aware UTC
     assert raw["ts_local"].dt.tz is None              # naive local wall-clock
-    # channels landed
-    assert raw["glucose_mgdl"].notna().sum() >= 180
+    # channels landed: 180 CGM readings + 2 bolus SMBG folded in
+    assert raw["glucose_mgdl"].notna().sum() == 182
     assert (raw["carbs_g"] > 0).sum() == 2            # two meals
     assert raw["insulin_u"].notna().sum() == 2
     assert raw["hr"].notna().sum() == 3               # 3 heart_rate rows

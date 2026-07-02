@@ -5,8 +5,16 @@ sensors → this is a **Type-1, insulin-using** population, not the wellness wed
 Consequences (§7): COB/IOB become primary predictors, and the regulatory line
 shifts toward a medical device — surface as "patterns/insights", not dosing.
 
-Confirmed source conventions: ``recorded_at`` is **unix epoch milliseconds**,
-``glucose`` is **mg/dL**, and ``data`` / ``content`` columns are **JSON**.
+Confirmed against a real data sample:
+- ``recorded_at`` is **unix epoch milliseconds**; ``glucose`` is **mg/dL** (also
+  ``user_settings.content.glucose_unit == "mgdl"``).
+- CGM is **Dexcom G7** (``sensors.type``) → native 5-min cadence (grid_minutes=5).
+- ``bolus_entries.glucose`` is a real SMBG at bolus time → folded into the glucose
+  channel to enrich coverage.
+- ``events`` are **alerts** (e.g. ``glucose_high``), *derived from glucose*, so they
+  are deliberately NOT used as inputs (would be circular / leaky).
+- ``sport_measurements.type`` includes ``WEIGHT`` (a user-static attribute, not a
+  30-60 min forecasting signal); only heart-rate/steps types feed the grid.
 
 Design: I/O (``connect`` / ``fetch_tables`` / ``inspect``) is separated from pure
 transformation (``assemble_raw`` and the unit/timestamp helpers) so the mapping
@@ -125,13 +133,17 @@ def assemble_raw(tables: dict[str, pd.DataFrame], cfg: Config) -> pd.DataFrame:
         )
 
     # --- bolus (carbs + insulin => COB/IOB, now primary) -------------------
+    # Also carries the pre-bolus SMBG (bolus_entries.glucose) — a real glucose
+    # reading that enriches the CGM channel and fills gaps.
     b = tables.get("bolus_entries")
     if b is not None and len(b):
         carbs = pd.to_numeric(b["carbohydrates"], errors="coerce").to_numpy()
+        smbg = to_mgdl(b["glucose"], pg.source_glucose_unit).to_numpy() if "glucose" in b else np.full(len(b), np.nan)
         blocks.append(
             _channel_block(
                 b["user_id"],
                 to_datetime_utc(b["recorded_at"], pg.ts_unit),
+                glucose_mgdl=np.where(smbg > 0, smbg, np.nan),
                 carbs_g=np.where(carbs > 0, carbs, np.nan),
                 insulin_u=pd.to_numeric(b["insulin"], errors="coerce").to_numpy(),
                 meal_flag=(carbs > 0),
