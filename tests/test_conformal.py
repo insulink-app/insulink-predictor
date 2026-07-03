@@ -49,10 +49,13 @@ def test_offsets_shape_and_order():
     assert (off[0.1] <= off[0.9] + 1e-9).all()
 
 
-def test_curve_conformal_band_valid():
+def test_curve_conformal_band_valid(tmp_path):
     cfg = _cfg()
     grid = align(generate(cfg), cfg)
-    res = run_curve(cfg, df=grid, horizon_min=60, band=True, conformal=True, out=None)
+    # write to a tmp path — never pollute reports/ with synthetic-data diagrams.
+    res = run_curve(
+        cfg, df=grid, horizon_min=60, band=True, conformal=True, out=tmp_path / "c.png"
+    )
     assert res["examples"], "expected at least one forecast example"
     for ex in res["examples"]:
         lo = np.asarray(ex["lower"])
