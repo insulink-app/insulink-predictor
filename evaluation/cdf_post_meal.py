@@ -17,6 +17,7 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 
 from insulink_predictor.config import load_config
+from insulink_predictor.eval.outputs import diagram_path
 from insulink_predictor.data.align import align
 from insulink_predictor.data.load import load_raw
 from insulink_predictor.eval.backtest import walk_forward_masks
@@ -99,7 +100,7 @@ axes[0].legend(loc="lower right", frameon=False, fontsize=10)
 fig.suptitle(f"Post-meal absolute-error CDF (≤{POST_MIN} min after a logged meal) — walk-forward OOF",
              fontweight="bold", fontsize=13)
 fig.tight_layout(rect=(0, 0, 1, 0.96))
-out = cfg.paths.reports_dir / "error_cdf_postmeal.png"
+out = diagram_path(cfg.paths.reports_dir, "cdf", "post_meal", "lgbm-tuned_knn-tricube")
 fig.savefig(out, dpi=130)
 print(f"-> {out}\n")
 print(f"{'horizon':>7} {'model':<22} {'n':>6} {'median':>7} {'P90':>7} {'skill':>8}")

@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from insulink_predictor.config import load_config
+from insulink_predictor.eval.outputs import diagram_path
 from insulink_predictor.data.align import align
 from insulink_predictor.data.load import load_raw
 from insulink_predictor.eval.metrics import rmse, skill_score
@@ -140,6 +141,6 @@ axes[0].legend(loc="lower right", frameon=False, fontsize=10)
 fig.suptitle("Post-meal error CDF — recursive 5-min stepping vs direct (matched features)",
              fontweight="bold", fontsize=13)
 fig.tight_layout(rect=(0, 0, 1, 0.96))
-out = cfg.paths.reports_dir / "error_cdf_recursive.png"
+out = diagram_path(cfg.paths.reports_dir, "cdf", "recursive_vs_direct", "reduced-feats")
 fig.savefig(out, dpi=130)
 print(f"-> {out}")

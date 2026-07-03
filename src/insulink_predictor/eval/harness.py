@@ -19,6 +19,7 @@ from ..features.target import build_targets
 from ..models.baseline import persistence_predict
 from .error_grid import clarke_zone_pct, parkes_zone_pct, plot_parkes, unsafe_fraction
 from .metrics import mae, rmse, skill_score
+from .outputs import diagram_path, table_path
 from .reporting import mlflow_run, plot_curves, plot_feature_importance, write_table
 from .split import chronological_split, heldout_user_split
 
@@ -89,7 +90,11 @@ def error_grid_table(
         cz = clarke_zone_pct(yt, yp)
         if plot:
             plot_parkes(
-                yt, yp, reports / f"{prefix}_parkes_h{h * cfg.grid_minutes}.png"
+                yt,
+                yp,
+                diagram_path(
+                    reports, "error_grid", f"parkes_h{h * cfg.grid_minutes}", prefix
+                ),
             )
         rows.append(
             {
@@ -118,8 +123,8 @@ def run_baseline_eval(
 
     if write:
         reports = Path(cfg.paths.reports_dir)
-        write_table(metrics, reports / "persistence_metrics.csv")
-        write_table(grids, reports / "persistence_error_grid.csv")
+        write_table(metrics, table_path(reports, "persistence_metrics"))
+        write_table(grids, table_path(reports, "persistence_error_grid"))
         with mlflow_run(cfg, "persistence") as log:
             log.params(
                 {"model": "persistence", "test_fraction": cfg.split.test_fraction}
@@ -165,9 +170,12 @@ def run_lgbm_eval(
 
     if write:
         reports = Path(cfg.paths.reports_dir)
-        write_table(comparison, reports / "model_comparison.csv")
-        write_table(fi, reports / "feature_importance.csv")
-        plot_feature_importance(fi, reports / "feature_importance.png")
+        write_table(comparison, table_path(reports, "model_comparison"))
+        write_table(fi, table_path(reports, "feature_importance"))
+        fi_png = diagram_path(
+            reports, "feature_importance", "feature_importance", "lgbm"
+        )
+        plot_feature_importance(fi, fi_png)
         error_grid_table(test, cfg, pred_fn, "lgbm", plot=True)
         with mlflow_run(cfg, "lgbm") as log:
             log.params(
@@ -180,7 +188,7 @@ def run_lgbm_eval(
             for _, r in lgbm_m.iterrows():
                 hm = int(r["horizon_min"])
                 log.metrics({f"rmse_h{hm}": r["rmse"], f"skill_h{hm}": r["skill"]})
-            log.artifact(reports / "feature_importance.png")
+            log.artifact(fi_png)
 
     return {
         "comparison": comparison,
@@ -272,7 +280,7 @@ def run_model_comparison(
 
     if write:
         reports = Path(cfg.paths.reports_dir)
-        write_table(comparison, reports / "model_comparison_knn.csv")
+        write_table(comparison, table_path(reports, "model_comparison_knn"))
 
     return {
         "comparison": comparison,
@@ -517,11 +525,13 @@ def run_curve(
         q_offsets=q_offsets,
     )
 
-    suffix = "" if model == "lgbm" else f"_{model}"
+    params = model + ("_conformal" if conformal else "")
     out = (
         Path(out)
         if out
-        else Path(cfg.paths.reports_dir) / f"curves_{horizon_min}min{suffix}.png"
+        else diagram_path(
+            cfg.paths.reports_dir, "curves", f"curve_{horizon_min}min", params
+        )
     )
     if examples:
         plot_curves(examples, out)
@@ -573,9 +583,11 @@ def run_event_eval(
 
     if write:
         reports = Path(cfg.paths.reports_dir)
-        write_table(comparison, reports / "event_skill.csv")
+        write_table(comparison, table_path(reports, "event_skill"))
         if examples:
-            plot_curves(examples, reports / "event_curves.png")
+            plot_curves(
+                examples, diagram_path(reports, "curves", "event_curves", "lgbm")
+            )
         with mlflow_run(cfg, "events") as log:
             log.params(
                 {
@@ -704,8 +716,8 @@ def run_personalize_eval(
 
     if write:
         reports = Path(cfg.paths.reports_dir)
-        write_table(summary, reports / "personalization_summary.csv")
-        write_table(per_user, reports / "personalization_per_user.csv")
+        write_table(summary, table_path(reports, "personalization_summary"))
+        write_table(per_user, table_path(reports, "personalization_per_user"))
         with mlflow_run(cfg, "personalize") as log:
             log.params(
                 {"min_residual_rows": 200, "heldout": ",".join(cfg.split.heldout_users)}
