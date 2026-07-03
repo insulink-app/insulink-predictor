@@ -124,6 +124,9 @@ def curve(
     knn_k: int = typer.Option(
         100, "--knn-k", help="Neighbors when --model knn (band is empirical)."
     ),
+    conformal: bool = typer.Option(
+        False, "--conformal", help="Recalibrate the LGBM band to nominal coverage."
+    ),
     out: Optional[Path] = typer.Option(
         None, help="Output PNG (default: reports/curves_<h>min[_<model>].png)."
     ),
@@ -172,6 +175,7 @@ def curve(
         hi=hi,
         model=model,
         knn_k=knn_k,
+        conformal=conformal,
     )
     if res.get("metrics") is not None and not res["metrics"].empty:
         typer.echo(

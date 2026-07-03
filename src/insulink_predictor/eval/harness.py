@@ -312,7 +312,15 @@ def subset_skill(
 
 
 def _curve_examples(
-    test, curve_models, feature_cols, cfg, max_step=None, n=3, at=None, qmodels=None
+    test,
+    curve_models,
+    feature_cols,
+    cfg,
+    max_step=None,
+    n=3,
+    at=None,
+    qmodels=None,
+    q_offsets=None,
 ) -> list[dict]:
     """Forecast trajectories with a fully-observed future.
 
@@ -320,6 +328,7 @@ def _curve_examples(
     timestamp) if given. ``max_step`` sets the curve length (defaults to the
     longest configured horizon). If ``qmodels`` is given, each example also gets a
     ``lower``/``upper`` uncertainty band (the plotted line becomes the median).
+    ``q_offsets`` (per-quantile per-step arrays) conformally recalibrates the band.
     """
     from ..models.events import forecast_curve
 
@@ -368,6 +377,8 @@ def _curve_examples(
                 q: forecast_curve(row, m, feature_cols, delta)[0][:max_step]
                 for q, m in qmodels.items()
             }
+            if q_offsets is not None:  # conformal recalibration of the band
+                qf = {q: v + q_offsets[q][:max_step] for q, v in qf.items()}
             # sort across quantiles per step to prevent crossing
             stacked = np.sort(np.vstack([qf[q] for q in sorted(qf)]), axis=0)
             ex["lower"] = [float(x) for x in stacked[0]]
@@ -430,6 +441,7 @@ def run_curve(
     hi=0.9,
     model="lgbm",
     knn_k=100,
+    conformal=False,
 ) -> dict:
     """Train curve models on the early data and plot forecast trajectories.
 
@@ -439,9 +451,12 @@ def run_curve(
     draw an uncertainty band — LGBM trains ``lo``/0.5/``hi`` quantile models per
     step; k-NN reads the band empirically off the neighbor set (no extra models).
     ``model`` selects the per-step learner: ``"lgbm"`` (default) or ``"knn"``.
+    ``conformal`` (LGBM band) holds out a calibration slice of the training data to
+    recalibrate the band to nominal coverage (raw quantile GBMs are over-confident).
     """
     from ..models.events import (
         build_curve_targets,
+        conformal_offsets,
         detect_events,
         train_curve_models,
         train_quantile_curve_models,
@@ -463,6 +478,8 @@ def run_curve(
             "reason": "not enough data to train/forecast this range",
         }
 
+    delta = cfg.features.predict_delta
+    q_offsets = None
     if model == "knn":
         from ..models.knn import quantile_knn_curve_models, train_knn_curve_models
 
@@ -473,16 +490,21 @@ def run_curve(
             quantile_knn_curve_models(curve_models, (lo, 0.5, hi)) if band else None
         )
     else:
-        curve_models = train_curve_models(
-            train, feature_cols, max_step, cfg.features.predict_delta
-        )
-        qmodels = (
-            train_quantile_curve_models(
-                train, feature_cols, max_step, (lo, 0.5, hi), cfg.features.predict_delta
+        curve_models = train_curve_models(train, feature_cols, max_step, delta)
+        if band and conformal:
+            # hold out a calibration slice; fit quantiles on the rest, then
+            # recalibrate the band to nominal coverage on the held-out residuals.
+            proper, calib = chronological_split(train, 0.25)
+            qmodels = train_quantile_curve_models(
+                proper, feature_cols, max_step, (lo, 0.5, hi), delta
             )
-            if band
-            else None
-        )
+            q_offsets = conformal_offsets(qmodels, calib, feature_cols, max_step, delta)
+        elif band:
+            qmodels = train_quantile_curve_models(
+                train, feature_cols, max_step, (lo, 0.5, hi), delta
+            )
+        else:
+            qmodels = None
     examples = _curve_examples(
         test,
         curve_models,
@@ -492,6 +514,7 @@ def run_curve(
         n=n,
         at=at,
         qmodels=qmodels,
+        q_offsets=q_offsets,
     )
 
     suffix = "" if model == "lgbm" else f"_{model}"
