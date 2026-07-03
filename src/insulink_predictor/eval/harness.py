@@ -27,14 +27,19 @@ PredFn = Callable[[pd.DataFrame, int], np.ndarray]
 
 
 def load_grid(cfg: Config) -> pd.DataFrame:
-    """Load the aligned grid parquet, regenerating from synth if it is absent."""
-    path = cfg.paths.data_dir / "processed" / "grid.parquet"
-    if path.exists():
-        return pd.read_parquet(path)
-    from ..data.align import align
-    from ..data.synth import generate
+    """Load the aligned **real-data** grid parquet (written by ``gf load``).
 
-    return align(generate(cfg), cfg)
+    The pipeline is real-data only — there is no synthetic fallback, so every
+    table and report is generated from real data. If the grid is absent, run
+    ``gf load`` first to fetch it from the database.
+    """
+    path = cfg.paths.data_dir / "processed" / "grid.parquet"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"No data grid at {path}. Run `gf load` to fetch real data from the "
+            "database first — the pipeline does not generate synthetic data."
+        )
+    return pd.read_parquet(path)
 
 
 def persistence_ref_rmse(

@@ -1,7 +1,8 @@
 """``gf`` — one Typer command per pipeline step (ROADMAP §2).
 
-Phase 0 ships ``gf synth``. Later phases add ``features``, ``train-*`` and
-``eval`` commands.
+Real-data only: ``gf load`` fetches the database into the grid; ``features``,
+``train-*``, ``eval`` and the diagrams all run on that real grid. There is no
+synthetic-data path — every table and report is generated from real data.
 """
 
 from __future__ import annotations
@@ -18,37 +19,9 @@ app = typer.Typer(help="Glucose forecasting pipeline (gf).", no_args_is_help=Tru
 
 @app.callback()
 def main() -> None:
-    """Glucose forecasting pipeline. Run a sub-command, e.g. ``gf synth``."""
+    """Glucose forecasting pipeline. Run a sub-command, e.g. ``gf load``."""
     # Presence of a callback keeps commands as sub-commands even when only one
     # exists yet (Typer would otherwise collapse a lone command to the top level).
-
-
-@app.command()
-def synth(
-    config: Path = typer.Option(
-        Path("config/config.yaml"), help="Path to config.yaml."
-    ),
-    out: Optional[Path] = typer.Option(
-        None, help="Output parquet (default: data/processed/grid.parquet)."
-    ),
-) -> None:
-    """Generate synthetic data, align to the grid, validate the contract, write parquet."""
-    from .data.align import align
-    from .data.synth import generate
-
-    cfg = load_config(config)
-    raw = generate(cfg)
-    grid = align(raw, cfg)  # validates against the schema internally
-
-    out = out or cfg.paths.data_dir / "processed" / "grid.parquet"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    grid.to_parquet(out)
-
-    gaps = int(grid["sensor_gap"].sum())
-    typer.echo(
-        f"synth: {grid['user_id'].nunique()} users, {len(grid)} rows "
-        f"({gaps} gap buckets, {gaps / len(grid):.1%}) -> {out}"
-    )
 
 
 @app.command()
@@ -93,7 +66,6 @@ def curve(
     config: Path = typer.Option(
         Path("config/config.yaml"), help="Path to config.yaml."
     ),
-    source: str = typer.Option("db", help="Data source: 'db' (PostgreSQL) or 'synth'."),
     user: Optional[str] = typer.Option(None, help="Restrict to a single user_id."),
     since: Optional[str] = typer.Option(
         None, help="Range start date (UTC), e.g. 2026-05-01."
@@ -145,18 +117,13 @@ def curve(
     from .eval.harness import run_curve
 
     cfg = load_config(config)
-    if source == "synth":
-        from .data.synth import generate
+    from .data.load import load_raw
 
-        grid = align(generate(cfg), cfg)
-    else:
-        from .data.load import load_raw
-
-        raw = load_raw(cfg, since=since, user_ids=[user] if user else None)
-        if raw.empty:
-            typer.echo("curve: no rows returned (check DATABASE_URL / filters).")
-            raise typer.Exit(code=1)
-        grid = align(raw, cfg)
+    raw = load_raw(cfg, since=since, user_ids=[user] if user else None)
+    if raw.empty:
+        typer.echo("curve: no rows returned (check DATABASE_URL / filters).")
+        raise typer.Exit(code=1)
+    grid = align(raw, cfg)
 
     if until:
         grid = grid[grid["ts_utc"] <= pd.Timestamp(until, tz="UTC")]
@@ -187,7 +154,7 @@ def curve(
     if not res["examples"]:
         typer.echo(
             f"curve: nothing to plot ({res.get('reason', 'no meal event / --at with full future')}); "
-            f"train={res['n_train']}, test={res['n_test']}. Try a wider range or --source synth."
+            f"train={res['n_train']}, test={res['n_test']}. Try a wider date range."
         )
         raise typer.Exit(code=1)
     typer.echo(
@@ -314,12 +281,9 @@ def backtest(
     config: Path = typer.Option(
         Path("config/config.yaml"), help="Path to config.yaml."
     ),
-    source: str = typer.Option(
-        "synth", help="Data source: 'synth' or 'db' (PostgreSQL)."
-    ),
-    user: Optional[str] = typer.Option(None, help="Restrict to a single user_id (db)."),
+    user: Optional[str] = typer.Option(None, help="Restrict to a single user_id."),
     since: Optional[str] = typer.Option(
-        None, help="Only rows on/after this date, e.g. 2026-04-01 (db)."
+        None, help="Only rows on/after this date, e.g. 2026-04-01."
     ),
     folds: int = typer.Option(5, help="Number of rolling-origin (expanding) folds."),
     test_span: float = typer.Option(
@@ -329,33 +293,27 @@ def backtest(
     """Walk-forward skill with error bars — the trustworthy number (mean ± std).
 
     Trains the direct multi-horizon model on several expanding chronological folds
-    (per user, embargoed) and reports skill mean ± std and the worst fold vs
-    persistence. A single 80/20 split (``gf eval``) hides this fold-to-fold noise.
-    With ``--source db`` the folds run on real data (credentials from env).
+    (per user, embargoed) on real data and reports skill mean ± std and the worst
+    fold vs persistence. A single 80/20 split (``gf eval``) hides this noise.
     """
+    from .data.align import align
+    from .data.load import load_raw
     from .eval.backtest import run_backtest
 
     cfg = load_config(config)
-    grid = None
-    if source == "db":
-        from .data.align import align
-        from .data.load import load_raw
-
-        raw = load_raw(cfg, since=since, user_ids=[user] if user else None)
-        if raw.empty:
-            typer.echo("backtest: no rows returned (check DATABASE_URL / filters).")
-            raise typer.Exit(code=1)
-        grid = align(raw, cfg)
+    raw = load_raw(cfg, since=since, user_ids=[user] if user else None)
+    if raw.empty:
+        typer.echo("backtest: no rows returned (check DATABASE_URL / filters).")
+        raise typer.Exit(code=1)
+    grid = align(raw, cfg)
 
     res = run_backtest(cfg, df=grid, n_folds=folds, test_span=test_span, write=True)
-    typer.echo(
-        f"Walk-forward skill vs persistence ({source}, {folds} folds, expanding):"
-    )
+    typer.echo(f"Walk-forward skill vs persistence ({folds} folds, expanding):")
     typer.echo(res["summary"].to_string(index=False))
     s = res["summary"]
     verdict = "PASS" if (s["worst"] > 0).all() else "FAIL"
     typer.echo(f"\nBeats persistence on every fold & horizon? {verdict}")
-    typer.echo(f"Reports written to {cfg.paths.reports_dir}/backtest_*.csv")
+    typer.echo(f"Reports written to {cfg.paths.reports_dir}/tables/backtest_*.csv")
 
 
 @app.command(name="train-events")
