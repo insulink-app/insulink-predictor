@@ -65,13 +65,20 @@ def test_knn_predicts_finite_absolute_glucose():
         assert (preds[valid] > 20).all() and (preds[valid] < 600).all()
 
 
-def test_curve_runs_on_knn_with_empirical_band():
+def test_curve_runs_on_knn_with_empirical_band(tmp_path):
     # gf curve --model knn: trajectory forecast + a band read off the neighbor
     # set (no separately-trained quantile models), enclosing the median.
     cfg = Config(synth={"n_users": 4, "days": 14, "seed": 7}, mlflow={"enabled": False})
     grid = align(generate(cfg), cfg)
+    # tmp out — never pollute reports/ with synthetic-data diagrams.
     res = run_curve(
-        cfg, df=grid, horizon_min=60, model="knn", knn_k=50, band=True, out=None
+        cfg,
+        df=grid,
+        horizon_min=60,
+        model="knn",
+        knn_k=50,
+        band=True,
+        out=tmp_path / "c.png",
     )
     assert res["examples"], "expected at least one post-meal forecast example"
     for ex in res["examples"]:
