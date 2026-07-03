@@ -18,6 +18,7 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 
 from insulink_predictor.config import load_config
+from insulink_predictor.eval.outputs import diagram_path
 from insulink_predictor.data.align import align
 from insulink_predictor.data.load import load_raw
 from insulink_predictor.eval.backtest import walk_forward_masks
@@ -102,7 +103,7 @@ axes[0].legend(loc="lower right", frameon=False, fontsize=10)
 fig.suptitle("Absolute-error CDF — walk-forward out-of-sample over all data (up & left = better)",
              fontweight="bold", fontsize=13)
 fig.tight_layout(rect=(0, 0, 1, 0.96))
-out = cfg.paths.reports_dir / "error_cdf_oof.png"
+out = diagram_path(cfg.paths.reports_dir, "cdf", "walk_forward_oof", "lgbm-tuned_knn-tricube")
 fig.savefig(out, dpi=130)
 print(f"\n-> {out}")
 

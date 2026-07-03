@@ -128,7 +128,8 @@ def curve(
         False, "--conformal", help="Recalibrate the LGBM band to nominal coverage."
     ),
     out: Optional[Path] = typer.Option(
-        None, help="Output PNG (default: reports/curves_<h>min[_<model>].png)."
+        None,
+        help="Output PNG (default: reports/curves/curve_<h>min_<model>_<timestamp>.png).",
     ),
 ) -> None:
     """Plot forecast trajectories (0..horizon min) for a user / DB time range.
@@ -201,17 +202,19 @@ def db_inspect(
         Path("config/config.yaml"), help="Path to config.yaml."
     ),
     out: Optional[Path] = typer.Option(
-        None, help="Write the JSON report here (default: reports/db_inspection.json)."
+        None,
+        help="Write the JSON report here (default: reports/tables/db_inspection.json).",
     ),
 ) -> None:
     """Probe the DB: ts unit, glucose unit, CGM cadence, type vocabularies, JSON samples."""
     import json
 
     from .data.load import inspect
+    from .eval.outputs import table_path
 
     cfg = load_config(config)
     report = inspect(cfg)
-    out = out or cfg.paths.reports_dir / "db_inspection.json"
+    out = out or table_path(cfg.paths.reports_dir, "db_inspection", "json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
     typer.echo(json.dumps(report, indent=2, default=str))
