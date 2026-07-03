@@ -49,8 +49,7 @@ All CDF scripts write to `reports/cdf/`:
   are constants at the top of each script — edit to taste.
 - The colors are the Okabe–Ito colorblind-safe palette (persistence = gray,
   LGBM = blue, k-NN/recursive = vermillion/green).
-- To run on synthetic instead of DB, replace `align(load_raw(cfg), cfg)` with
-  `align(generate(cfg), cfg)` (`from insulink_predictor.data.synth import generate`)
-  and drop `--env-file .env`.
-- The canonical skill-with-error-bars number is still `gf backtest --source db`;
-  these CDFs are for seeing the *shape* of the error distribution.
+- These run on **real DB data only** — like the rest of the pipeline, there is no
+  synthetic-data path.
+- The canonical skill-with-error-bars number is still `gf backtest`; these CDFs
+  are for seeing the *shape* of the error distribution.
