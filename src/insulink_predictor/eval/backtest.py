@@ -154,6 +154,7 @@ def run_backtest(
     """
     from ..models.lgbm import make_pred_fn, train_lgbm
     from .harness import build_supervised
+    from .outputs import table_path
     from .reporting import mlflow_run, write_table
 
     sup, feature_cols = build_supervised(cfg, df)
@@ -175,8 +176,8 @@ def run_backtest(
 
     if write:
         reports = Path(cfg.paths.reports_dir)
-        write_table(perfold, reports / "backtest_per_fold.csv")
-        write_table(summary, reports / "backtest_summary.csv")
+        write_table(perfold, table_path(reports, "backtest_per_fold"))
+        write_table(summary, table_path(reports, "backtest_summary"))
         with mlflow_run(cfg, "backtest") as log:
             log.params({"model": "lgbm", "n_folds": n_folds, "test_span": test_span})
             for _, r in summary.iterrows():
