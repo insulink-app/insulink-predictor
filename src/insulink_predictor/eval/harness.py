@@ -19,6 +19,7 @@ from ..features.target import build_targets
 from ..models.baseline import persistence_predict
 from .error_grid import clarke_zone_pct, parkes_zone_pct, plot_parkes, unsafe_fraction
 from .metrics import mae, rmse, skill_score
+from .outputs import diagram_path, table_path
 from .reporting import mlflow_run, plot_curves, plot_feature_importance, write_table
 from .split import chronological_split, heldout_user_split
 
@@ -26,14 +27,19 @@ PredFn = Callable[[pd.DataFrame, int], np.ndarray]
 
 
 def load_grid(cfg: Config) -> pd.DataFrame:
-    """Load the aligned grid parquet, regenerating from synth if it is absent."""
-    path = cfg.paths.data_dir / "processed" / "grid.parquet"
-    if path.exists():
-        return pd.read_parquet(path)
-    from ..data.align import align
-    from ..data.synth import generate
+    """Load the aligned **real-data** grid parquet (written by ``gf load``).
 
-    return align(generate(cfg), cfg)
+    The pipeline is real-data only — there is no synthetic fallback, so every
+    table and report is generated from real data. If the grid is absent, run
+    ``gf load`` first to fetch it from the database.
+    """
+    path = cfg.paths.data_dir / "processed" / "grid.parquet"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"No data grid at {path}. Run `gf load` to fetch real data from the "
+            "database first — the pipeline does not generate synthetic data."
+        )
+    return pd.read_parquet(path)
 
 
 def persistence_ref_rmse(
@@ -89,7 +95,11 @@ def error_grid_table(
         cz = clarke_zone_pct(yt, yp)
         if plot:
             plot_parkes(
-                yt, yp, reports / f"{prefix}_parkes_h{h * cfg.grid_minutes}.png"
+                yt,
+                yp,
+                diagram_path(
+                    reports, "error_grid", f"parkes_h{h * cfg.grid_minutes}", prefix
+                ),
             )
         rows.append(
             {
@@ -118,8 +128,8 @@ def run_baseline_eval(
 
     if write:
         reports = Path(cfg.paths.reports_dir)
-        write_table(metrics, reports / "persistence_metrics.csv")
-        write_table(grids, reports / "persistence_error_grid.csv")
+        write_table(metrics, table_path(reports, "persistence_metrics"))
+        write_table(grids, table_path(reports, "persistence_error_grid"))
         with mlflow_run(cfg, "persistence") as log:
             log.params(
                 {"model": "persistence", "test_fraction": cfg.split.test_fraction}
@@ -165,9 +175,12 @@ def run_lgbm_eval(
 
     if write:
         reports = Path(cfg.paths.reports_dir)
-        write_table(comparison, reports / "model_comparison.csv")
-        write_table(fi, reports / "feature_importance.csv")
-        plot_feature_importance(fi, reports / "feature_importance.png")
+        write_table(comparison, table_path(reports, "model_comparison"))
+        write_table(fi, table_path(reports, "feature_importance"))
+        fi_png = diagram_path(
+            reports, "feature_importance", "feature_importance", "lgbm"
+        )
+        plot_feature_importance(fi, fi_png)
         error_grid_table(test, cfg, pred_fn, "lgbm", plot=True)
         with mlflow_run(cfg, "lgbm") as log:
             log.params(
@@ -180,7 +193,7 @@ def run_lgbm_eval(
             for _, r in lgbm_m.iterrows():
                 hm = int(r["horizon_min"])
                 log.metrics({f"rmse_h{hm}": r["rmse"], f"skill_h{hm}": r["skill"]})
-            log.artifact(reports / "feature_importance.png")
+            log.artifact(fi_png)
 
     return {
         "comparison": comparison,
@@ -272,7 +285,7 @@ def run_model_comparison(
 
     if write:
         reports = Path(cfg.paths.reports_dir)
-        write_table(comparison, reports / "model_comparison_knn.csv")
+        write_table(comparison, table_path(reports, "model_comparison_knn"))
 
     return {
         "comparison": comparison,
@@ -312,7 +325,15 @@ def subset_skill(
 
 
 def _curve_examples(
-    test, curve_models, feature_cols, cfg, max_step=None, n=3, at=None, qmodels=None
+    test,
+    curve_models,
+    feature_cols,
+    cfg,
+    max_step=None,
+    n=3,
+    at=None,
+    qmodels=None,
+    q_offsets=None,
 ) -> list[dict]:
     """Forecast trajectories with a fully-observed future.
 
@@ -320,6 +341,7 @@ def _curve_examples(
     timestamp) if given. ``max_step`` sets the curve length (defaults to the
     longest configured horizon). If ``qmodels`` is given, each example also gets a
     ``lower``/``upper`` uncertainty band (the plotted line becomes the median).
+    ``q_offsets`` (per-quantile per-step arrays) conformally recalibrates the band.
     """
     from ..models.events import forecast_curve
 
@@ -368,6 +390,8 @@ def _curve_examples(
                 q: forecast_curve(row, m, feature_cols, delta)[0][:max_step]
                 for q, m in qmodels.items()
             }
+            if q_offsets is not None:  # conformal recalibration of the band
+                qf = {q: v + q_offsets[q][:max_step] for q, v in qf.items()}
             # sort across quantiles per step to prevent crossing
             stacked = np.sort(np.vstack([qf[q] for q in sorted(qf)]), axis=0)
             ex["lower"] = [float(x) for x in stacked[0]]
@@ -430,6 +454,7 @@ def run_curve(
     hi=0.9,
     model="lgbm",
     knn_k=100,
+    conformal=False,
 ) -> dict:
     """Train curve models on the early data and plot forecast trajectories.
 
@@ -439,9 +464,12 @@ def run_curve(
     draw an uncertainty band — LGBM trains ``lo``/0.5/``hi`` quantile models per
     step; k-NN reads the band empirically off the neighbor set (no extra models).
     ``model`` selects the per-step learner: ``"lgbm"`` (default) or ``"knn"``.
+    ``conformal`` (LGBM band) holds out a calibration slice of the training data to
+    recalibrate the band to nominal coverage (raw quantile GBMs are over-confident).
     """
     from ..models.events import (
         build_curve_targets,
+        conformal_offsets,
         detect_events,
         train_curve_models,
         train_quantile_curve_models,
@@ -463,6 +491,8 @@ def run_curve(
             "reason": "not enough data to train/forecast this range",
         }
 
+    delta = cfg.features.predict_delta
+    q_offsets = None
     if model == "knn":
         from ..models.knn import quantile_knn_curve_models, train_knn_curve_models
 
@@ -473,16 +503,21 @@ def run_curve(
             quantile_knn_curve_models(curve_models, (lo, 0.5, hi)) if band else None
         )
     else:
-        curve_models = train_curve_models(
-            train, feature_cols, max_step, cfg.features.predict_delta
-        )
-        qmodels = (
-            train_quantile_curve_models(
-                train, feature_cols, max_step, (lo, 0.5, hi), cfg.features.predict_delta
+        curve_models = train_curve_models(train, feature_cols, max_step, delta)
+        if band and conformal:
+            # hold out a calibration slice; fit quantiles on the rest, then
+            # recalibrate the band to nominal coverage on the held-out residuals.
+            proper, calib = chronological_split(train, 0.25)
+            qmodels = train_quantile_curve_models(
+                proper, feature_cols, max_step, (lo, 0.5, hi), delta
             )
-            if band
-            else None
-        )
+            q_offsets = conformal_offsets(qmodels, calib, feature_cols, max_step, delta)
+        elif band:
+            qmodels = train_quantile_curve_models(
+                train, feature_cols, max_step, (lo, 0.5, hi), delta
+            )
+        else:
+            qmodels = None
     examples = _curve_examples(
         test,
         curve_models,
@@ -492,13 +527,16 @@ def run_curve(
         n=n,
         at=at,
         qmodels=qmodels,
+        q_offsets=q_offsets,
     )
 
-    suffix = "" if model == "lgbm" else f"_{model}"
+    params = model + ("_conformal" if conformal else "")
     out = (
         Path(out)
         if out
-        else Path(cfg.paths.reports_dir) / f"curves_{horizon_min}min{suffix}.png"
+        else diagram_path(
+            cfg.paths.reports_dir, "curves", f"curve_{horizon_min}min", params
+        )
     )
     if examples:
         plot_curves(examples, out)
@@ -550,9 +588,11 @@ def run_event_eval(
 
     if write:
         reports = Path(cfg.paths.reports_dir)
-        write_table(comparison, reports / "event_skill.csv")
+        write_table(comparison, table_path(reports, "event_skill"))
         if examples:
-            plot_curves(examples, reports / "event_curves.png")
+            plot_curves(
+                examples, diagram_path(reports, "curves", "event_curves", "lgbm")
+            )
         with mlflow_run(cfg, "events") as log:
             log.params(
                 {
@@ -681,8 +721,8 @@ def run_personalize_eval(
 
     if write:
         reports = Path(cfg.paths.reports_dir)
-        write_table(summary, reports / "personalization_summary.csv")
-        write_table(per_user, reports / "personalization_per_user.csv")
+        write_table(summary, table_path(reports, "personalization_summary"))
+        write_table(per_user, table_path(reports, "personalization_per_user"))
         with mlflow_run(cfg, "personalize") as log:
             log.params(
                 {"min_residual_rows": 200, "heldout": ",".join(cfg.split.heldout_users)}

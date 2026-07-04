@@ -49,7 +49,7 @@ def test_forecast_curve_shape(event_result):
     assert curve.shape == (10, max(cfg.horizons_steps))
 
 
-def test_curve_band_brackets_median():
+def test_curve_band_brackets_median(tmp_path):
     from insulink_predictor.eval.harness import run_curve
 
     cfg = Config(
@@ -58,7 +58,17 @@ def test_curve_band_brackets_median():
         mlflow={"enabled": False},
     )
     grid = align(generate(cfg), cfg)
-    res = run_curve(cfg, df=grid, horizon_min=30, n=2, band=True, lo=0.1, hi=0.9)
+    # tmp out — never pollute reports/ with synthetic-data diagrams.
+    res = run_curve(
+        cfg,
+        df=grid,
+        horizon_min=30,
+        n=2,
+        band=True,
+        lo=0.1,
+        hi=0.9,
+        out=tmp_path / "c.png",
+    )
     assert res["examples"], "expected at least one banded curve"
     for ex in res["examples"]:
         lower = np.array(ex["lower"])
