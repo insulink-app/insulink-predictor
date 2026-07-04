@@ -1,9 +1,11 @@
-"""Absolute-error CDF: tuned LGBM vs best k-NN vs persistence on ALL DB data.
+"""Absolute-error CDF: LGBM vs k-NN vs persistence on ALL DB data.
 
-Full dataset, chronological 80/20 split; both learners trained on the train
-portion, errors measured out-of-sample on the test tail. A CDF that rises higher
-and further left = more predictions with small error = better.
+Both learners are **re-tuned to the loaded dataset** (LGBM params + k-NN k, chosen
+on a validation slice of the training data) before anything is computed, then
+trained on the full training split and scored out-of-sample on the test tail.
+A CDF that rises higher and further left = more predictions with small error.
 """
+
 from __future__ import annotations
 
 import matplotlib
@@ -11,50 +13,37 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from sklearn.impute import SimpleImputer
-from sklearn.neighbors import NearestNeighbors
-from sklearn.preprocessing import StandardScaler
+from _tuning import build_knn_pred_fn, build_lgbm_pred_fn, tune_knn, tune_lgbm
 
 from insulink_predictor.config import load_config
-from insulink_predictor.eval.outputs import diagram_path
 from insulink_predictor.data.align import align
 from insulink_predictor.data.load import load_raw
 from insulink_predictor.eval.harness import build_supervised
+from insulink_predictor.eval.outputs import diagram_path
 from insulink_predictor.eval.split import chronological_split
 from insulink_predictor.models.baseline import persistence_predict
-from insulink_predictor.models.lgbm import make_pred_fn, train_lgbm
-
-EPS = 1e-9
-KNN_K = {30: 300, 60: 800}  # tuned tricube neighborhood per horizon
 
 # Okabe-Ito colorblind-safe: gray reference, blue, vermillion.
-COLORS = {"persistence": "#7f7f7f", "LGBM (tuned)": "#0072B2", "k-NN (eucl+tricube)": "#D55E00"}
-STYLES = {"persistence": (0, (5, 2)), "LGBM (tuned)": "-", "k-NN (eucl+tricube)": "-"}
+COLORS = {
+    "persistence": "#7f7f7f",
+    "LGBM (tuned)": "#0072B2",
+    "k-NN (tuned)": "#D55E00",
+}
+STYLES = {"persistence": (0, (5, 2)), "LGBM (tuned)": "-", "k-NN (tuned)": "-"}
 
 cfg = load_config()
 sup, cols = build_supervised(cfg, align(load_raw(cfg), cfg))
 train, test = chronological_split(sup, cfg.split.test_fraction)
-print(f"all data: {len(sup)} rows, {sup['user_id'].nunique()} user(s); "
-      f"train={len(train)} test={len(test)}")
+print(
+    f"all data: {len(sup)} rows, {sup['user_id'].nunique()} user(s); "
+    f"train={len(train)} test={len(test)}"
+)
 
-lgbm = train_lgbm(train, cols, cfg)
-lgbm_pred = make_pred_fn(lgbm, cols, cfg.features.predict_delta)
-
-
-def knn_predict(h, k):
-    mtr = train[f"valid_{h}"].to_numpy()
-    Xtr = train.loc[mtr, cols]
-    ytr = (train.loc[mtr, f"y_{h}"] - train.loc[mtr, "glucose_mgdl"]).to_numpy()
-    im = SimpleImputer(strategy="median", keep_empty_features=True).fit(Xtr)
-    sc = StandardScaler().fit(im.transform(Xtr))
-    trans = lambda X: sc.transform(im.transform(X))
-    nn = NearestNeighbors(n_neighbors=k, metric="minkowski", p=2).fit(trans(Xtr))
-    dist, idx = nn.kneighbors(trans(test[cols]))
-    u = dist / np.maximum(dist[:, -1:], EPS)
-    w = np.clip(1 - u**3, 0, None) ** 3  # tricube
-    delta = (w * ytr[idx]).sum(1) / np.maximum(w.sum(1), EPS)
-    return delta + test["glucose_mgdl"].to_numpy()
-
+print("tuning to dataset (validation slice of train)...")
+lgbm_params = tune_lgbm(train, cols, cfg)
+knn_ks = tune_knn(train, cols, cfg)
+lgbm_pred = build_lgbm_pred_fn(train, cols, cfg, lgbm_params)
+knn_pred = build_knn_pred_fn(train, cols, cfg, knn_ks)
 
 fig, axes = plt.subplots(1, 2, figsize=(12, 4.8), sharey=True)
 summary = []
@@ -65,19 +54,27 @@ for ax, h in zip(axes, cfg.horizons_steps):
     preds = {
         "persistence": persistence_predict(test, h)[m],
         "LGBM (tuned)": lgbm_pred(test, h)[m],
-        "k-NN (eucl+tricube)": knn_predict(h, KNN_K[hm])[m],
+        "k-NN (tuned)": knn_pred(test, h)[m],
     }
     for name, yp in preds.items():
-        ae = np.abs(yt - yp)
-        ae = np.sort(ae[np.isfinite(ae)])
+        ae = np.sort(np.abs(yt - yp))
         cdf = np.arange(1, len(ae) + 1) / len(ae)
         ax.plot(ae, cdf, color=COLORS[name], lw=2, linestyle=STYLES[name], label=name)
-        summary.append((hm, name, float(np.median(ae)), float(np.percentile(ae, 90))))
+        summary.append(
+            (
+                hm,
+                name,
+                float(np.median(np.abs(yt - yp))),
+                float(np.percentile(np.abs(yt - yp), 90)),
+            )
+        )
     xcap = float(np.percentile(np.abs(yt - preds["persistence"]), 98))
     ax.set_xlim(0, xcap)
     ax.set_ylim(0, 1)
-    ax.axhline(0.5, color="#d9d9d9", lw=0.8, zorder=0)  # median reference
-    ax.set_title(f"{hm}-min horizon  (n={int(m.sum())})", fontsize=11)
+    ax.axhline(0.5, color="#d9d9d9", lw=0.8, zorder=0)
+    ax.set_title(
+        f"{hm}-min horizon  (n={int(m.sum())}, k-NN k={knn_ks[hm]})", fontsize=11
+    )
     ax.set_xlabel("absolute error  |pred − actual|  (mg/dL)")
     ax.grid(True, alpha=0.25, lw=0.6)
     for s in ("top", "right"):
@@ -85,13 +82,16 @@ for ax, h in zip(axes, cfg.horizons_steps):
 
 axes[0].set_ylabel("cumulative fraction of predictions ≤ x")
 axes[0].legend(loc="lower right", frameon=False, fontsize=10)
-fig.suptitle("Absolute-error CDF — out-of-sample test on full DB data  (up & left = better)",
-             fontweight="bold", fontsize=13)
+fig.suptitle(
+    "Absolute-error CDF — auto-tuned LGBM vs k-NN, out-of-sample (up & left = better)",
+    fontweight="bold",
+    fontsize=13,
+)
 fig.tight_layout(rect=(0, 0, 1, 0.96))
-out = diagram_path(cfg.paths.reports_dir, "cdf", "model_comparison", "lgbm-tuned_knn-tricube")
+out = diagram_path(cfg.paths.reports_dir, "cdf", "model_comparison", "auto-tuned")
 fig.savefig(out, dpi=130)
 print(f"\n-> {out}")
 
-print(f"\n{'horizon':>7} {'model':<22} {'median AE':>10} {'P90 AE':>8}")
+print(f"\n{'horizon':>7} {'model':<16} {'median AE':>10} {'P90 AE':>8}")
 for hm, name, med, p90 in summary:
-    print(f"{hm:>7} {name:<22} {med:>10.2f} {p90:>8.2f}")
+    print(f"{hm:>7} {name:<16} {med:>10.2f} {p90:>8.2f}")
