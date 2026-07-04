@@ -46,6 +46,8 @@ RAW_COLUMNS = [
     "activity_flag",
     "hr",
     "weather_temp",
+    "daily_steps",
+    "daily_distance",
     "isf",
     "icr",
 ]
@@ -141,6 +143,8 @@ def _channel_block(user_id, ts_utc, **channels) -> pd.DataFrame:
         "activity_flag": np.zeros(n, dtype=bool),
         "hr": np.full(n, np.nan),
         "weather_temp": np.full(n, np.nan),
+        "daily_steps": np.full(n, np.nan),
+        "daily_distance": np.full(n, np.nan),
     }
     block.update({k: np.asarray(v) for k, v in channels.items()})
     return pd.DataFrame(block)
@@ -210,6 +214,21 @@ def assemble_raw(tables: dict[str, pd.DataFrame], cfg: Config) -> pd.DataFrame:
                         sm["user_id"].to_numpy()[mask],
                         ts[mask],
                         **{channel: val.to_numpy()[mask]},
+                    )
+                )
+
+        # daily STEPS/DISTANCE totals -> a per-day activity context, carried on
+        # their own daily_* columns (broadcast per day in align, lagged causally to
+        # "yesterday" in build_features). These are the DAILY aggregates that the
+        # intraday gate above deliberately keeps out of the 5-min `steps` channel.
+        for channel, typ in (("daily_steps", "steps"), ("daily_distance", "distance")):
+            dmask = (t == typ).to_numpy()
+            if dmask.any():
+                blocks.append(
+                    _channel_block(
+                        sm["user_id"].to_numpy()[dmask],
+                        ts[dmask],
+                        **{channel: val.to_numpy()[dmask]},
                     )
                 )
 
