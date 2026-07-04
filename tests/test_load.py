@@ -13,6 +13,7 @@ import pandas as pd
 from insulink_predictor.config import Config
 from insulink_predictor.data.align import align
 from insulink_predictor.data.load import (
+    RAW_COLUMNS,
     assemble_raw,
     detect_glucose_unit,
     detect_ts_unit,
@@ -209,18 +210,4 @@ def test_empty_tables_yield_empty_raw():
     cfg = Config()
     raw = assemble_raw({}, cfg)
     assert raw.empty
-    assert list(raw.columns) == [
-        "user_id",
-        "ts_utc",
-        "ts_local",
-        "glucose_mgdl",
-        "meal_flag",
-        "carbs_g",
-        "insulin_u",
-        "steps",
-        "activity_flag",
-        "hr",
-        "weather_temp",
-        "isf",
-        "icr",
-    ]
+    assert list(raw.columns) == RAW_COLUMNS
