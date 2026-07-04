@@ -183,6 +183,24 @@ def build_features(df: pd.DataFrame, cfg: Config) -> tuple[pd.DataFrame, list[st
         df["workout_flag"] = df["activity_flag"].astype(int)
         cols.append("workout_flag")
 
+    # --- daily activity context (causal: yesterday's completed totals) ------
+    # daily_steps/daily_distance are broadcast per local day, so shifting one full
+    # day back yields yesterday's total (known at day start). Exercise raises
+    # insulin sensitivity for 24-48h -> blunts the post-meal excursion.
+    if fc.use_daily_activity and _has_channel(df, "daily_steps"):
+        day = max(1, 1440 // grid)  # buckets per day (288 at 5-min)
+        ds = df.groupby("user_id", sort=False)["daily_steps"]
+        df["steps_yesterday"] = ds.shift(day)
+        df["steps_3d_avg"] = pd.concat(
+            [ds.shift(day), ds.shift(2 * day), ds.shift(3 * day)], axis=1
+        ).mean(axis=1)
+        cols += ["steps_yesterday", "steps_3d_avg"]
+        if _has_channel(df, "daily_distance"):
+            df["distance_yesterday"] = df.groupby("user_id", sort=False)[
+                "daily_distance"
+            ].shift(day)
+            cols.append("distance_yesterday")
+
     # --- optional context channels (degrade cleanly) ------------------------
     if fc.use_carbs and _has_channel(df, "carbs_g"):
         df["cob"] = _decay_accumulate(df, "carbs_g", fc.cob_tau_min, grid)

@@ -44,6 +44,13 @@ GRID_SCHEMA = pa.DataFrameSchema(
         "activity_flag": pa.Column(bool, nullable=False, required=False),
         "hr": pa.Column(float, checks=pa.Check.ge(0), nullable=True, required=False),
         "weather_temp": pa.Column(float, nullable=True, required=False),
+        # Daily activity totals (per-day context), broadcast per local date.
+        "daily_steps": pa.Column(
+            float, checks=pa.Check.ge(0), nullable=True, required=False
+        ),
+        "daily_distance": pa.Column(
+            float, checks=pa.Check.ge(0), nullable=True, required=False
+        ),
         # per-user therapy settings (ISF/ICR); optional, carried for therapy features
         "isf": pa.Column(float, checks=pa.Check.gt(0), nullable=True, required=False),
         "icr": pa.Column(float, checks=pa.Check.gt(0), nullable=True, required=False),
