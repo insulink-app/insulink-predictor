@@ -6,6 +6,7 @@ the *architecture* question: does chaining six easy 5-min steps beat one 30-min
 jump? A sanity check asserts the rollout reconstructs features identically to the
 pipeline at step 0 before any result is trusted. Single chronological split.
 """
+
 from __future__ import annotations
 
 import matplotlib
@@ -26,16 +27,27 @@ from insulink_predictor.models.lgbm import _make_regressor
 cfg = load_config()
 grid = align(load_raw(cfg), cfg)
 feat, _ = build_features(grid, cfg)
-sup = build_targets(feat, [1, 6, 12]).sort_values(["user_id", "ts_utc"]).reset_index(drop=True)
+sup = (
+    build_targets(feat, [1, 6, 12])
+    .sort_values(["user_id", "ts_utc"])
+    .reset_index(drop=True)
+)
 assert sup["user_id"].nunique() == 1, "rollout seeding assumes one contiguous user"
 
-LAGS = cfg.features.glucose_lags_min           # [0,5,10,15,30,45,60]
-LSTEP = [m // cfg.grid_minutes for m in LAGS]   # [0,1,2,3,6,9,12]
+LAGS = cfg.features.glucose_lags_min  # [0,5,10,15,30,45,60]
+LSTEP = [m // cfg.grid_minutes for m in LAGS]  # [0,1,2,3,6,9,12]
 ROLLW = [m // cfg.grid_minutes for m in cfg.features.roll_windows_min]  # [6,12]
-FEATS = ([f"lag_{m}" for m in LAGS] + ["rate_short", "rate_long", "accel"]
-         + [f"roll{m}_{s}" for m in cfg.features.roll_windows_min for s in ("mean", "std", "min", "max")]
-         + ["hour_sin", "hour_cos", "is_weekend", "day_of_week", "time_since_meal"])
-MAXBACK = max(max(LSTEP), max(ROLLW))           # history needed = 12 steps
+FEATS = (
+    [f"lag_{m}" for m in LAGS]
+    + ["rate_short", "rate_long", "accel"]
+    + [
+        f"roll{m}_{s}"
+        for m in cfg.features.roll_windows_min
+        for s in ("mean", "std", "min", "max")
+    ]
+    + ["hour_sin", "hour_cos", "is_weekend", "day_of_week", "time_since_meal"]
+)
+MAXBACK = max(max(LSTEP), max(ROLLW))  # history needed = 12 steps
 
 g_all = sup["glucose_mgdl"].to_numpy()
 cut = int(len(sup) * (1.0 - cfg.split.test_fraction))
@@ -67,11 +79,13 @@ def reconstruct(H, s_elapsed, hour0, dow0, weekend0, tsm0):
 # --- train: 5-min recursive model + direct 30/60 models, matched features ----
 train = sup.iloc[:cut]
 
+
 def fit(hstep):
     m = train[f"valid_{hstep}"].to_numpy()
     X = train.loc[m, FEATS]
     y = (train.loc[m, f"y_{hstep}"] - train.loc[m, "glucose_mgdl"]).to_numpy()
     return _make_regressor().fit(X, y)
+
 
 m1, m6, m12 = fit(1), fit(6), fit(12)
 
@@ -110,23 +124,38 @@ preds_dir = {6: m6.predict(P0) + g0, 12: m12.predict(P0) + g0}
 fig, axes = plt.subplots(1, 2, figsize=(12, 4.8), sharey=True)
 COL = {"persistence": "#7f7f7f", "direct": "#0072B2", "recursive 5-min": "#009E73"}
 STY = {"persistence": (0, (5, 2)), "direct": "-", "recursive 5-min": "-"}
-print(f"\n{'horizon':>7} {'window':>9} {'model':<16} {'median':>7} {'P90':>7} {'skill':>8}")
+print(
+    f"\n{'horizon':>7} {'window':>9} {'model':<16} {'median':>7} {'P90':>7} {'skill':>8}"
+)
 for ax, hstep in zip(axes, (6, 12)):
     hm = hstep * cfg.grid_minutes
     y_true = test[f"y_{hstep}"].to_numpy()
     valid = test[f"valid_{hstep}"].to_numpy()
     tsm = test["time_since_meal"].to_numpy()
     post = valid & np.isfinite(tsm) & (tsm <= 60)
-    series = {"persistence": g0, "direct": preds_dir[hstep], "recursive 5-min": preds_rec[hstep]}
+    series = {
+        "persistence": g0,
+        "direct": preds_dir[hstep],
+        "recursive 5-min": preds_rec[hstep],
+    }
     for win, mask in (("all", valid), ("post_meal", post)):
         for name, yp in series.items():
             ae = np.abs(y_true[mask] - yp[mask])
             sk = skill_score(rmse(y_true[mask], yp[mask]), rmse(y_true[mask], g0[mask]))
-            print(f"{hm:>7} {win:>9} {name:<16} {np.median(ae):>7.1f} {np.percentile(ae, 90):>7.1f} {sk:>+8.4f}")
+            print(
+                f"{hm:>7} {win:>9} {name:<16} {np.median(ae):>7.1f} {np.percentile(ae, 90):>7.1f} {sk:>+8.4f}"
+            )
     # post-meal CDF
     for name, yp in series.items():
         ae = np.sort(np.abs(y_true[post] - yp[post]))
-        ax.plot(ae, np.arange(1, len(ae) + 1) / len(ae), color=COL[name], lw=2, linestyle=STY[name], label=name)
+        ax.plot(
+            ae,
+            np.arange(1, len(ae) + 1) / len(ae),
+            color=COL[name],
+            lw=2,
+            linestyle=STY[name],
+            label=name,
+        )
     ax.set_xlim(0, float(np.percentile(np.abs(y_true[post] - g0[post]), 98)))
     ax.set_ylim(0, 1)
     ax.axhline(0.5, color="#d9d9d9", lw=0.8, zorder=0)
@@ -138,8 +167,11 @@ for ax, hstep in zip(axes, (6, 12)):
     print()
 axes[0].set_ylabel("cumulative fraction of predictions ≤ x")
 axes[0].legend(loc="lower right", frameon=False, fontsize=10)
-fig.suptitle("Post-meal error CDF — recursive 5-min stepping vs direct (matched features)",
-             fontweight="bold", fontsize=13)
+fig.suptitle(
+    "Post-meal error CDF — recursive 5-min stepping vs direct (matched features)",
+    fontweight="bold",
+    fontsize=13,
+)
 fig.tight_layout(rect=(0, 0, 1, 0.96))
 out = diagram_path(cfg.paths.reports_dir, "cdf", "recursive_vs_direct", "reduced-feats")
 fig.savefig(out, dpi=130)
