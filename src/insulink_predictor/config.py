@@ -69,6 +69,19 @@ class FeatureConfig(BaseModel):
     ins_resp_rise_min: float = 20.0
     ins_resp_decay_min: float = 70.0
 
+    # Daily activity context: yesterday's *completed* step/distance totals (plus a
+    # 3-day average), broadcast onto every bucket and strictly causal. Exercise
+    # raises insulin sensitivity for 24-48h, so an active prior day blunts the
+    # post-meal excursion. Consumes the DB daily STEPS/DISTANCE aggregates;
+    # degrades cleanly (feature absent) when they are (e.g. synth).
+    #
+    # OFF by default: paired walk-forward on the real DB user shows it HELPS the
+    # post-meal window (+0.002…+0.007, 8/10 folds @30) but slightly HURTS the
+    # overall window (−0.001…−0.005) — extra variance on the 98% non-post-meal
+    # rows. Net ~neutral. Enable when optimizing post-meal specifically, and
+    # re-test with `gf backtest` on multi-user data.
+    use_daily_activity: bool = False
+
     # Model the CHANGE over persistence (target = y_{t+h} − g_t) instead of the
     # absolute level. The regularized learner shrinks the delta toward ~0 when
     # there's no signal, so quiet periods fall back to persistence instead of

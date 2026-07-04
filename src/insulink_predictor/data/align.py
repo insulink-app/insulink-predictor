@@ -9,7 +9,6 @@ Contract produced:
 
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 
 from ..config import Config
@@ -29,7 +28,12 @@ def _align_user(sub: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     # drift ±jitter around the nominal cadence, so rounding keeps a reading in its
     # intended bucket instead of spilling into the previous one.
     bucket = sub["ts_utc"].dt.round(freq)
-    grid = pd.date_range(bucket.min(), bucket.max(), freq=freq, tz="UTC")
+    # Anchor the grid to the glucose signal's span. Auxiliary channels (e.g. daily
+    # activity, which can predate the CGM) must not stretch the grid into
+    # glucose-less time; readings outside the CGM span aren't forecastable anyway.
+    gb = bucket[sub["glucose_mgdl"].notna().to_numpy()]
+    lo, hi = (gb.min(), gb.max()) if len(gb) else (bucket.min(), bucket.max())
+    grid = pd.date_range(lo, hi, freq=freq, tz="UTC")
 
     g = sub.assign(_bucket=bucket).groupby("_bucket")
     agg = pd.DataFrame(
@@ -79,6 +83,14 @@ def _align_user(sub: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     for col in ("isf", "icr"):
         if col in sub.columns:
             out[col] = sub[col].iloc[0]
+
+    # Daily activity totals: one value per day -> broadcast to every bucket of that
+    # local date (max over the date; NaN for days with no measurement). Lagged to
+    # "yesterday" causally in build_features; degrades cleanly when absent.
+    for col in ("daily_steps", "daily_distance"):
+        if col in sub.columns:
+            out[col] = g[col].max().reindex(grid).to_numpy()
+            out[col] = out.groupby(out["ts_local"].dt.date)[col].transform("max")
     return out
 
 
