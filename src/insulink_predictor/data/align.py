@@ -96,7 +96,11 @@ def _align_user(sub: pd.DataFrame, cfg: Config) -> pd.DataFrame:
 
 def align(raw: pd.DataFrame, cfg: Config, *, do_validate: bool = True) -> pd.DataFrame:
     """Resample irregular raw data to a regular per-user grid; validate the contract."""
-    frames = [_align_user(sub, cfg) for _, sub in raw.groupby("user_id", sort=True)]
+    # Skip users with no CGM (e.g. an empty duplicate account) — there is nothing
+    # to forecast, and their auxiliary rows would only inflate the grid with gaps.
+    groups = list(raw.groupby("user_id", sort=True))
+    with_cgm = [(k, sub) for k, sub in groups if sub["glucose_mgdl"].notna().any()]
+    frames = [_align_user(sub, cfg) for _, sub in (with_cgm or groups)]
     grid = pd.concat(frames, ignore_index=True)
     grid = grid.sort_values(["user_id", "ts_utc"]).reset_index(drop=True)
     if do_validate:
