@@ -12,7 +12,11 @@ from insulink_predictor.eval.harness import run_lgbm_eval
 
 @pytest.fixture(scope="module")
 def lgbm_result():
-    cfg = Config(synth={"n_users": 4, "days": 12, "seed": 3}, mlflow={"enabled": False})
+    cfg = Config(
+        synth={"n_users": 4, "days": 12, "seed": 3},
+        model={"auto_tune": False},  # fast frozen-param path for tests
+        mlflow={"enabled": False},
+    )
     grid = align(generate(cfg), cfg)
     return run_lgbm_eval(cfg, df=grid, write=False)
 
