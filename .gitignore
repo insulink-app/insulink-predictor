@@ -27,3 +27,9 @@ reports/db_inspection.json
 
 # Ad-hoc forecast curve outputs (vary per user/range/time)
 reports/curves_*.png
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
