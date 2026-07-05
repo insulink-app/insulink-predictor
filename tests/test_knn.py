@@ -25,7 +25,11 @@ from insulink_predictor.models.knn import make_knn_pred_fn, train_knn
 
 @pytest.fixture(scope="module")
 def comparison():
-    cfg = Config(synth={"n_users": 4, "days": 12, "seed": 3}, mlflow={"enabled": False})
+    cfg = Config(
+        synth={"n_users": 4, "days": 12, "seed": 3},
+        model={"auto_tune": False},  # fast frozen-param path for tests
+        mlflow={"enabled": False},
+    )
     grid = align(generate(cfg), cfg)
     return run_model_comparison(cfg, df=grid, k=50, write=False)
 
