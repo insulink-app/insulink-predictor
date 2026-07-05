@@ -57,12 +57,10 @@ _DEFAULT_PARAMS = dict(
     reg_lambda=4.0,
 )
 
-# Per-horizon configs from an Optuna/TPE search (120 trials/horizon) on real
-# per-user data: chosen on a chronological validation slice, then confirmed by
-# 5-fold walk-forward (tuned beat the default at 60min in 5/5 folds, +0.013 mean
-# skill; at 30min in 4/5, +0.007). Both favour a slow learning rate with many
-# trees, but the horizons want genuinely different capacity. Tuned on a single
-# user's data — revisit when multi-user data lands.
+# Frozen per-horizon configs (the FALLBACK used when cfg.model.auto_tune is off).
+# By default train_lgbm re-tunes to the loaded data via models.tuning.tune_lgbm;
+# these are a fast, deterministic starting point (from an earlier TPE search on
+# the real user — slow learning rate, many trees, different capacity per horizon).
 _TUNED_PARAMS: dict[int, dict] = {
     30: dict(
         n_estimators=480,
@@ -97,11 +95,14 @@ def _make_regressor(
     cfg: Config | None = None,
     feature_cols: list[str] | None = None,
     horizon_min: int | None = None,
+    params: dict | None = None,
 ) -> LGBMRegressor:
-    """Deterministic LGBM. Uses the per-horizon TPE-tuned config when
-    ``horizon_min`` has one (30/60); otherwise the regularized default. ``cfg``
-    overrides (huber objective, monotone therapy constraints) are layered on top."""
-    params = _TUNED_PARAMS.get(horizon_min, _DEFAULT_PARAMS)
+    """Deterministic LGBM. Uses ``params`` when given (e.g. freshly auto-tuned);
+    else the per-horizon frozen config when ``horizon_min`` has one (30/60);
+    else the regularized default. ``cfg`` overrides (huber objective, monotone
+    therapy constraints) are layered on top."""
+    if params is None:
+        params = _TUNED_PARAMS.get(horizon_min, _DEFAULT_PARAMS)
     reg = LGBMRegressor(**_BASE_PARAMS, **params)
     if cfg is not None:
         m = cfg.model
@@ -132,15 +133,22 @@ def train_lgbm(
     (y_{t+h} − g_t); persistence is added back at inference.
     """
     delta = cfg.features.predict_delta
+    tuned: dict[int, dict | None] | None = None
+    if cfg.model.auto_tune:
+        from .tuning import tune_lgbm as _tune  # lazy import avoids a cycle
+
+        tuned = _tune(train, feature_cols, cfg)
     models: dict[int, LGBMRegressor] = {}
     for h in cfg.horizons_steps:
+        hm = h * cfg.grid_minutes
         mask = train[f"valid_{h}"].to_numpy()
         X = train.loc[mask, feature_cols]
         excursion = (
             train.loc[mask, f"y_{h}"] - train.loc[mask, "glucose_mgdl"]
         ).to_numpy()
         y = excursion if delta else train.loc[mask, f"y_{h}"].to_numpy()
-        model = _make_regressor(cfg, feature_cols, h * cfg.grid_minutes)
+        params = tuned.get(hm) if tuned is not None else None
+        model = _make_regressor(cfg, feature_cols, hm, params=params)
         model.fit(X, y, sample_weight=_excursion_weight(excursion, cfg))
         models[h] = model
     return models
