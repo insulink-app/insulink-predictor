@@ -120,6 +120,15 @@ class ModelConfig(BaseModel):
     objective: str = "l2"  # l2 | huber
     huber_delta: float = 8.0  # mg/dL; residual scale where huber turns linear
 
+    # Re-tune LGBM hyperparameters to the training data on every train_lgbm call
+    # (random search + early stopping on a chronological validation slice), instead
+    # of the frozen `_TUNED_PARAMS`. Adapts to whatever data is loaded; costs a
+    # tuning pass per train (per fold in `gf backtest`). Set False for the fast
+    # frozen-param path (used by the test suite for speed + determinism).
+    auto_tune: bool = True
+    tune_trials: int = 30
+    tune_val_fraction: float = 0.25
+
 
 class EventConfig(BaseModel):
     meal_trigger: bool = True
