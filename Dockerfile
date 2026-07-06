@@ -1,7 +1,8 @@
 # Glucose-forecast inference service (FastAPI). Internal only — the Spring
-# backend calls it. The model is trained on the HOST
-# (`uv run python scripts/train_and_save.py`) and mounted at /app/artifacts, so
-# retraining is a host step + a container restart (no image rebuild).
+# backend calls it. A built-in daily scheduler tunes + rebuilds each user's model
+# from the DB and writes them to /app/artifacts/models (a mounted volume), so
+# models persist on the host and are never baked into the image. There is no
+# global model — a user with no trained model yet gets a 404.
 FROM python:3.12-slim
 
 # LightGBM needs the OpenMP runtime at import time.
