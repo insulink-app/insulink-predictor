@@ -47,7 +47,12 @@ from pydantic import BaseModel
 
 from insulink_predictor.config import load_config
 from insulink_predictor.data.align import align
-from insulink_predictor.data.load import assemble_raw, connect, fetch_tables
+from insulink_predictor.data.load import (
+    assemble_raw,
+    connect,
+    fetch_tables,
+    to_datetime_utc,
+)
 from insulink_predictor.features.build import build_features
 from insulink_predictor.models.events import forecast_curve
 from serve import training
@@ -120,9 +125,13 @@ def _user_grid(user_id: str, readings: list[Reading]) -> pd.DataFrame | None:
 
     ``readings`` (the caller's freshest glucose) are injected as extra
     ``glucose_entries`` rows so the whole pipeline — unit handling, ISF/ICR merge,
-    bucket dedup, grid anchoring — treats them exactly like DB glucose. The grid is
-    anchored to the glucose span, so a reading newer than the DB tip extends the
-    origin forward. ``None`` when the user has no forecastable data (no CGM).
+    grid anchoring — treats them exactly like DB glucose. The grid is anchored to
+    the glucose span, so a reading newer than the DB tip extends the origin forward.
+
+    The async DB write may already hold some of these readings. To avoid a bucket
+    being fed from both sources (``align`` would otherwise average them), any DB
+    glucose row whose 5-min bucket a reading also covers is dropped first — the
+    fresher request value wins. ``None`` when there is no forecastable data (no CGM).
     """
     tables = fetch_tables(_CFG, engine=_engine(), user_ids=[user_id])
     if readings:
@@ -134,11 +143,17 @@ def _user_grid(user_id: str, readings: list[Reading]) -> pd.DataFrame | None:
             }
         )
         ge = tables.get("glucose_entries")
-        tables["glucose_entries"] = (
-            pd.concat([ge, tip], ignore_index=True)
-            if ge is not None and len(ge)
-            else tip
-        )
+        if ge is not None and len(ge):
+            freq = _CFG.grid_freq
+            unit = _CFG.pg.ts_unit
+            reading_buckets = set(
+                to_datetime_utc(tip["recorded_at"], unit).dt.round(freq)
+            )
+            db_buckets = to_datetime_utc(ge["recorded_at"], unit).dt.round(freq)
+            ge = ge[~db_buckets.isin(reading_buckets).to_numpy()]  # readings win
+            tables["glucose_entries"] = pd.concat([ge, tip], ignore_index=True)
+        else:
+            tables["glucose_entries"] = tip
     raw = assemble_raw(tables, _CFG)
     if raw.empty:
         return None
