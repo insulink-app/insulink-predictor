@@ -56,3 +56,47 @@ def test_retrain_all_skips_thin_users(monkeypatch, tmp_path):
     assert summary["skipped"] == 1 and summary["trained"] == 0
     assert summary["results"][0]["status"] == "skipped"
     assert not list(tmp_path.glob("*.joblib"))  # nothing promoted
+
+
+# --- promotion gate (champion/challenger) ----------------------------------- #
+def test_gate_promotes_when_beats_persistence_no_incumbent():
+    ok, _ = training._promotion_decision(
+        {30: 0.20, 60: 0.25}, None, has_incumbent=False
+    )
+    assert ok is True
+
+
+def test_gate_rejects_below_persistence_floor():
+    ok, reason = training._promotion_decision(
+        {30: 0.20, 60: -0.01}, None, has_incumbent=False
+    )
+    assert ok is False and "floor" in reason
+
+
+def test_gate_rejects_regression_against_incumbent():
+    ok, reason = training._promotion_decision(
+        {30: 0.10, 60: 0.20}, {30: 0.20, 60: 0.21}, has_incumbent=True
+    )
+    assert ok is False and "regression" in reason  # 0.10 < 0.20 - tol(0.02)
+
+
+def test_gate_promotes_within_tolerance_of_incumbent():
+    # slightly below incumbent but inside the 0.02 tolerance -> not a regression
+    ok, _ = training._promotion_decision(
+        {30: 0.19, 60: 0.20}, {30: 0.20, 60: 0.21}, has_incumbent=True
+    )
+    assert ok is True
+
+
+def test_gate_first_model_promotes_ungated_when_holdout_too_thin():
+    ok, reason = training._promotion_decision(
+        {30: None, 60: None}, None, has_incumbent=False
+    )
+    assert ok is True and "ungated" in reason
+
+
+def test_gate_keeps_incumbent_when_holdout_too_thin():
+    ok, reason = training._promotion_decision(
+        {30: None, 60: None}, {30: 0.2, 60: 0.2}, has_incumbent=True
+    )
+    assert ok is False and "incumbent" in reason
