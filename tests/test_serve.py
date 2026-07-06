@@ -91,6 +91,32 @@ def test_user_grid_folds_in_fresh_readings(monkeypatch):
     assert last_ms == readings[-1].ts  # newest reading is the grid tip
 
 
+def test_user_grid_readings_win_over_overlapping_db_bucket(monkeypatch):
+    """A reading and a DB row in the same 5-min bucket must not be averaged/doubled."""
+    monkeypatch.setattr(serve, "_engine", lambda: None)
+    step_ms = 5 * 60 * 1000
+    start = 1_700_000_100_000  # on a 5-min boundary
+    db_ts = [start + i * step_ms for i in range(5)]  # buckets 0..4, all value 100
+    ge = pd.DataFrame(
+        {"user_id": ["u1"] * 5, "recorded_at": db_ts, "value": [100.0] * 5}
+    )
+    monkeypatch.setattr(serve, "fetch_tables", lambda *a, **k: {"glucose_entries": ge})
+
+    readings = [
+        serve.Reading(ts=start + 4 * step_ms, mgdl=150.0),  # overlaps DB bucket 4
+        serve.Reading(ts=start + 5 * step_ms, mgdl=160.0),  # brand-new bucket 5
+    ]
+    grid = serve._user_grid("u1", readings)
+
+    def _val(bucket_i):
+        ts = pd.to_datetime(start + bucket_i * step_ms, unit="ms", utc=True)
+        return grid.loc[grid["ts_utc"] == ts, "glucose_mgdl"].iloc[0]
+
+    assert len(grid) == 6  # buckets 0..5, no duplicate row for the overlap
+    assert _val(4) == 150.0  # reading wins over the DB's 100 (not mean 125)
+    assert _val(5) == 160.0  # fresh reading extends the tip
+
+
 @pytest.mark.parametrize("horizon", [30, 60])
 def test_forecast_shape_and_range(monkeypatch, tiny_model, horizon):
     monkeypatch.setattr(serve, "_user_grid", lambda uid, readings: _ramp_grid(40))
