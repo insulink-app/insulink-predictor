@@ -212,9 +212,10 @@ async def _retrain_in_thread(what: str) -> None:
     try:
         summary = await asyncio.to_thread(_run_retrain)
         log.info(
-            "%s retrain done: trained=%s skipped=%s errors=%s",
+            "%s retrain done: trained=%s rejected=%s skipped=%s errors=%s",
             what,
             summary.get("trained"),
+            summary.get("rejected"),
             summary.get("skipped"),
             summary.get("errors"),
         )
