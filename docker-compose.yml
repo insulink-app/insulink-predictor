@@ -54,7 +54,6 @@ services:
       # Reach Postgres over the compose network (service name "postgres", port 5432).
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-insulink}@postgres:5432/${POSTGRES_DB:-insulink}
       MODELS_DIR: /app/artifacts/models   # per-user models (locally-mounted path)
-      MODEL_PATH: /app/artifacts/model.joblib  # global cold-start fallback
       ENABLE_SCHEDULER: "true"
       RETRAIN_HOUR: "3"                   # daily rebuild at 03:00 local
     ports:
