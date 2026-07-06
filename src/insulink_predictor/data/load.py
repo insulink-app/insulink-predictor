@@ -414,6 +414,29 @@ def load_raw(
     return assemble_raw(tables, cfg)
 
 
+def distinct_user_ids(cfg: Config, engine=None) -> list[str]:
+    """User ids that have CGM data — the candidates for a per-user model.
+
+    Applies the same compliance filter as ``fetch_tables`` so the background tune
+    job only builds models for users we are cleared to model.
+    """
+    from sqlalchemy import text
+
+    pg = cfg.pg
+    engine = engine or connect(cfg)
+    clause = ""
+    if pg.only_compliant:
+        clause = (
+            f" WHERE user_id IN (SELECT id FROM {_q(pg.db_schema, 'users')} "
+            "WHERE compliant = true)"
+        )
+    sql = text(
+        f"SELECT DISTINCT user_id FROM {_q(pg.db_schema, 'glucose_entries')}{clause}"
+    )
+    df = pd.read_sql(sql, engine)
+    return [str(u) for u in df["user_id"].tolist()]
+
+
 def inspect(cfg: Config, engine=None) -> dict:
     """Surface the unknowns the DDL hides: ts unit, glucose unit, type vocabularies.
 

@@ -55,11 +55,16 @@ def train_curve_models(
     feature_cols: list[str],
     max_step: int,
     predict_delta: bool = True,
+    params_by_step: dict[int, dict | None] | None = None,
 ) -> dict[int, object]:
     """Train one LightGBM per step ``1..max_step`` on valid rows.
 
     With ``predict_delta`` each step's target is the change over persistence
     (cy_k − g_t), added back in ``forecast_curve``.
+
+    ``params_by_step`` optionally supplies per-step hyperparameters (e.g. from the
+    background per-user tune job, mapping each step to its nearest tuned horizon);
+    when absent, every step falls back to the regularized ``_DEFAULT_PARAMS``.
     """
     models: dict[int, object] = {}
     for k in range(1, max_step + 1):
@@ -67,7 +72,8 @@ def train_curve_models(
         y = train.loc[mask, f"cy_{k}"]
         if predict_delta:
             y = y - train.loc[mask, "glucose_mgdl"]
-        models[k] = _make_regressor().fit(train.loc[mask, feature_cols], y)
+        params = params_by_step.get(k) if params_by_step else None
+        models[k] = _make_regressor(params=params).fit(train.loc[mask, feature_cols], y)
     return models
 
 

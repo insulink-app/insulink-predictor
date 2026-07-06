@@ -19,6 +19,11 @@ wheels/
 # Experiment tracking
 /mlruns/
 
+# Per-user models: runtime output of the tune job / mounted Docker volume — never
+# committed. Keep the directory (via .gitkeep) so the default MODELS_DIR exists.
+/artifacts/*
+!/artifacts/.gitkeep
+
 # DB inspection dumps contain real user data samples — never commit
 reports/db_inspection.json
 
@@ -30,3 +35,9 @@ reports/db_inspection.json
 
 # Ad-hoc forecast curve outputs (vary per user/range/time)
 reports/curves_*.png
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
