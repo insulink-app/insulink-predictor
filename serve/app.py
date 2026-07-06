@@ -1,24 +1,43 @@
 """FastAPI inference service for the glucose curve forecast.
 
-Loads the model serialized by ``scripts/train_and_save.py`` once at startup and
-serves a single endpoint. It is **internal** — the Spring backend
-(``insulink-api``) calls it and supplies the readings from its own database; this
-service is stateless and never talks to a DB.
+Serving is **DB-backed and per-user**. A request carries a ``user_id`` (plus the
+horizon); the service pulls that user's full history — glucose, carbs/insulin
+(COB/IOB), sport and per-user therapy (ISF/ICR) — straight from PostgreSQL and
+forecasts from the latest bucket, so the model sees every available channel.
+
+Models are per user. A background scheduler (see ``serve/training.py``) tunes and
+rebuilds each user's model **daily** and writes it to ``MODELS_DIR`` (a mounted
+Docker volume). On startup, if ``MODELS_DIR`` holds no models yet, an initial
+training run is kicked off in the background (the server still comes up at once).
+Serving loads ``MODELS_DIR/<user_id>.joblib`` — hot-reloaded on change. There is
+**no global fallback**: a user without a model yet (never trained, or too little
+data to tune) gets a 404.
+
+Because the DB is written asynchronously, the freshest CGM value may not have
+landed yet. The caller may pass ``readings`` — the latest glucose point(s) —
+folded into the glucose channel before alignment so the forecast is anchored to
+the true tip rather than a stale DB snapshot.
 
 Run:  ``uv run uvicorn serve.app:app --host 0.0.0.0 --port 8000``
-(``MODEL_PATH`` env overrides the artifact location.)
+Env: ``DATABASE_URL``/``GF_PG__*`` (DB), ``MODELS_DIR`` (per-user model dir),
+``ENABLE_SCHEDULER`` (default on), ``RETRAIN_HOUR`` (local hour, default 3).
+Run only ONE instance/worker with the scheduler enabled.
 
 Contract:
     POST /predict
-      {"readings": [{"ts": <epoch_ms>, "mgdl": <float>}, ...], "horizon_min": 30|60}
+      {"user_id": "<uuid>", "horizon_min": 30|60,
+       "readings": [{"ts": <epoch_ms>, "mgdl": <float>}, ...]}   # readings optional
     -> {"generated_at": <epoch_ms>, "horizon_min": 30,
         "curve": [{"offset_min": 5, "mgdl": 142.0}, ...]}
 """
 
 from __future__ import annotations
 
+import asyncio
+import datetime
+import logging
 import os
-from pathlib import Path
+from contextlib import asynccontextmanager, suppress
 
 import joblib
 import numpy as np
@@ -28,28 +47,35 @@ from pydantic import BaseModel
 
 from insulink_predictor.config import load_config
 from insulink_predictor.data.align import align
+from insulink_predictor.data.load import assemble_raw, connect, fetch_tables
 from insulink_predictor.features.build import build_features
 from insulink_predictor.models.events import forecast_curve
+from serve import training
+
+# Surface our INFO logs (scheduler / bootstrap / per-user training) — uvicorn only
+# wires handlers for its own loggers, so without this the tune activity is silent.
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+log = logging.getLogger("insulink.serve")
 
 _GLUCOSE_LO, _GLUCOSE_HI = 10.0, 700.0
-_MODEL_PATH = Path(os.environ.get("MODEL_PATH", "artifacts/model.joblib"))
 
-app = FastAPI(title="insulink-predictor")
+# One config for the tune job and serving (unmodified ``load_config()``) => every
+# per-user model sees exactly the multi-channel feature set it was trained on.
+_CFG = load_config()
+_ENGINE = None  # pooled SQLAlchemy engine, created on first request (see _engine)
+_user_model_cache: dict[str, tuple[float, dict]] = {}  # user_id -> (mtime, model)
 
-
-def _config():
-    """Glucose-only config — mirrors ``scripts/train_and_save.py`` (no skew)."""
-    cfg = load_config()
-    cfg.features.use_carbs = False
-    cfg.features.use_insulin = False
-    cfg.features.use_hr = False
-    cfg.features.use_weather = False
-    cfg.features.use_therapy = False
-    return cfg
-
-
-_CFG = _config()
-_MODEL = joblib.load(_MODEL_PATH) if _MODEL_PATH.exists() else None
+# --- scheduler config -------------------------------------------------------- #
+_SCHEDULER_ENABLED = os.environ.get("ENABLE_SCHEDULER", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+_RETRAIN_HOUR = int(os.environ.get("RETRAIN_HOUR", "3"))  # local hour of day, 0-23
 
 
 class Reading(BaseModel):
@@ -58,63 +84,212 @@ class Reading(BaseModel):
 
 
 class PredictRequest(BaseModel):
-    readings: list[Reading]
+    user_id: str
     horizon_min: int = 30
+    readings: list[Reading] = []  # freshest glucose not yet ingested by the DB
 
 
-def _grid_from_readings(readings: list[Reading]) -> pd.DataFrame:
-    """Turn raw readings into the aligned 5-min grid the feature builder expects."""
-    ts = pd.to_datetime([r.ts for r in readings], unit="ms", utc=True)
-    raw = pd.DataFrame(
-        {
-            "user_id": "app",
-            "ts_utc": ts,
-            "ts_local": ts.tz_convert(_CFG.pg.local_tz).tz_localize(None),
-            "glucose_mgdl": [float(r.mgdl) for r in readings],
-            "steps": 0,
-            "meal_flag": False,
-            "carbs_g": np.nan,
-            "insulin_u": np.nan,
-            "activity_flag": False,
-            "hr": np.nan,
-            "weather_temp": np.nan,
-        }
-    )
-    return align(raw, _CFG)
+def _engine():
+    """Return a pooled DB engine, created lazily so import/startup needs no live DB."""
+    global _ENGINE
+    if _ENGINE is None:
+        _ENGINE = connect(_CFG)
+    return _ENGINE
 
 
-def forecast(readings: list[Reading], horizon_min: int) -> list[float]:
-    """Absolute mg/dL trajectory ``t+5 … t+horizon``, clipped to plausible range."""
-    feat, _ = build_features(_grid_from_readings(readings), _CFG)
+def _model_for(user_id: str) -> dict | None:
+    """The user's own model if present (hot-reloaded on file change), else ``None``.
+
+    A background job writes ``MODELS_DIR/<user_id>.joblib`` atomically; we key the
+    cache on mtime so a freshly rebuilt model is picked up without a restart. There
+    is no global fallback — an absent file means the user has no model.
+    """
+    path = training.MODELS_DIR / f"{user_id}.joblib"
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None  # no model for this user (not trained / insufficient data)
+    cached = _user_model_cache.get(user_id)
+    if cached is None or cached[0] != mtime:
+        _user_model_cache[user_id] = (mtime, joblib.load(path))
+    return _user_model_cache[user_id][1]
+
+
+def _user_grid(user_id: str, readings: list[Reading]) -> pd.DataFrame | None:
+    """Aligned 5-min grid for one user, pulled from the DB (all channels).
+
+    ``readings`` (the caller's freshest glucose) are injected as extra
+    ``glucose_entries`` rows so the whole pipeline — unit handling, ISF/ICR merge,
+    bucket dedup, grid anchoring — treats them exactly like DB glucose. The grid is
+    anchored to the glucose span, so a reading newer than the DB tip extends the
+    origin forward. ``None`` when the user has no forecastable data (no CGM).
+    """
+    tables = fetch_tables(_CFG, engine=_engine(), user_ids=[user_id])
+    if readings:
+        tip = pd.DataFrame(
+            {
+                "user_id": user_id,
+                "recorded_at": [r.ts for r in readings],  # epoch ms, like the DB
+                "value": [float(r.mgdl) for r in readings],
+            }
+        )
+        ge = tables.get("glucose_entries")
+        tables["glucose_entries"] = (
+            pd.concat([ge, tip], ignore_index=True)
+            if ge is not None and len(ge)
+            else tip
+        )
+    raw = assemble_raw(tables, _CFG)
+    if raw.empty:
+        return None
+    grid = align(raw, _CFG)
+    return grid if not grid.empty else None
+
+
+def forecast(
+    user_id: str,
+    horizon_min: int,
+    readings: list[Reading] | None = None,
+    model: dict | None = None,
+) -> tuple[list[float], int]:
+    """Forecast a user's mg/dL trajectory ``t+5 … t+horizon`` from their DB history.
+
+    Uses the user's own model (``model`` arg, else resolved via ``_model_for``).
+    ``readings`` (optional) are the freshest glucose the async DB write may not hold
+    yet; they set the forecast origin. Returns ``(trajectory, generated_at_ms)`` —
+    origin = the latest bucket. ``([], 0)`` when there is no model or no data.
+    """
+    model = model or _model_for(user_id)
+    if model is None:
+        return [], 0
+    grid = _user_grid(user_id, readings or [])
+    if grid is None:
+        return [], 0
+    feat, _ = build_features(grid, _CFG)
     last = feat.iloc[[-1]].copy()
-    for col in _MODEL["feature_cols"]:  # reindex safety net: absent -> NaN (LGBM ok)
+    for col in model["feature_cols"]:  # reindex safety net: absent -> NaN (LGBM ok)
         if col not in last.columns:
             last[col] = np.nan
     curve = forecast_curve(
-        last, _MODEL["curve_models"], _MODEL["feature_cols"], _MODEL["predict_delta"]
+        last, model["curve_models"], model["feature_cols"], model["predict_delta"]
     )[0]
-    steps = max(1, horizon_min // _MODEL["grid_minutes"])
-    return [float(np.clip(v, _GLUCOSE_LO, _GLUCOSE_HI)) for v in curve[:steps]]
+    steps = max(1, horizon_min // model["grid_minutes"])
+    trajectory = [float(np.clip(v, _GLUCOSE_LO, _GLUCOSE_HI)) for v in curve[:steps]]
+    generated_at = int(last["ts_utc"].iloc[0].timestamp() * 1000)
+    return trajectory, generated_at
+
+
+# --------------------------------------------------------------------------- #
+# Daily retrain scheduler (dependency-free asyncio loop in the app lifespan)   #
+# --------------------------------------------------------------------------- #
+def _seconds_until_next(hour: int, now: datetime.datetime) -> float:
+    """Seconds from ``now`` to the next occurrence of ``hour:00`` local time."""
+    nxt = now.replace(hour=hour % 24, minute=0, second=0, microsecond=0)
+    if nxt <= now:
+        nxt += datetime.timedelta(days=1)
+    return (nxt - now).total_seconds()
+
+
+def _run_retrain(user_id: str | None = None) -> dict:
+    """Blocking tune+train (run in a worker thread). One user, or every user."""
+    if user_id:
+        return {
+            "n_users": 1,
+            "results": [training.train_user_model(_CFG, user_id, _engine())],
+        }
+    return training.retrain_all(_CFG, engine=_engine())
+
+
+def _has_any_model() -> bool:
+    """True if at least one per-user model exists on disk."""
+    md = training.MODELS_DIR
+    return md.exists() and any(md.glob("*.joblib"))
+
+
+async def _retrain_in_thread(what: str) -> None:
+    """Run a full retrain off the event loop and log the summary. Never raises."""
+    log.info("starting %s per-user retrain", what)
+    try:
+        summary = await asyncio.to_thread(_run_retrain)
+        log.info(
+            "%s retrain done: trained=%s skipped=%s errors=%s",
+            what,
+            summary.get("trained"),
+            summary.get("skipped"),
+            summary.get("errors"),
+        )
+    except Exception:  # a failed run must not kill the caller
+        log.exception("%s retrain crashed", what)
+
+
+async def _daily_retrain_loop() -> None:
+    while True:
+        delay = _seconds_until_next(_RETRAIN_HOUR, datetime.datetime.now())
+        log.info("next per-user retrain in %.0f min", delay / 60)
+        await asyncio.sleep(delay)
+        await _retrain_in_thread("scheduled")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    tasks: list[asyncio.Task] = []
+    if _SCHEDULER_ENABLED:
+        tasks.append(asyncio.create_task(_daily_retrain_loop()))
+        log.info(
+            "daily retrain scheduler enabled (RETRAIN_HOUR=%d local)", _RETRAIN_HOUR
+        )
+        # Cold start: with no models on disk, train them now (in the background, so
+        # the server still comes up immediately and serves 404s until they land).
+        if not _has_any_model():
+            log.info("no per-user models found -> starting initial training")
+            tasks.append(asyncio.create_task(_retrain_in_thread("initial")))
+    try:
+        yield
+    finally:
+        for t in tasks:
+            t.cancel()
+        for t in tasks:
+            with suppress(asyncio.CancelledError):
+                await t
+
+
+app = FastAPI(title="insulink-predictor", lifespan=lifespan)
 
 
 @app.get("/")
 def health() -> dict:
-    return {"status": "ok", "model_loaded": _MODEL is not None}
+    md = training.MODELS_DIR
+    n_user_models = len(list(md.glob("*.joblib"))) if md.exists() else 0
+    return {
+        "status": "ok",
+        "user_models": n_user_models,
+        "scheduler": _SCHEDULER_ENABLED,
+    }
 
 
 @app.post("/predict")
 def predict(req: PredictRequest) -> dict:
-    if _MODEL is None:
-        raise HTTPException(503, "model not loaded")
-    if not req.readings:
-        raise HTTPException(400, "no readings")
-    grid = _MODEL["grid_minutes"]
-    curve = forecast(req.readings, req.horizon_min)
+    model = _model_for(req.user_id)
+    if model is None:
+        raise HTTPException(
+            404,
+            f"no model for user {req.user_id} (not trained yet / insufficient data)",
+        )
+    curve, generated_at = forecast(req.user_id, req.horizon_min, req.readings, model)
+    if not curve:
+        raise HTTPException(404, f"no forecastable data for user {req.user_id}")
+    grid = model["grid_minutes"]
     return {
-        "generated_at": req.readings[-1].ts,
+        "generated_at": generated_at,
         "horizon_min": req.horizon_min,
         "curve": [
             {"offset_min": (i + 1) * grid, "mgdl": round(v, 1)}
             for i, v in enumerate(curve)
         ],
     }
+
+
+@app.post("/admin/retrain")
+async def admin_retrain(user_id: str | None = None) -> dict:
+    """Trigger a tune+train now — one ``user_id`` (fast) or all users (slow)."""
+    return await asyncio.to_thread(_run_retrain, user_id)
