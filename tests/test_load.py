@@ -185,6 +185,34 @@ def test_daily_aggregate_steps_are_excluded():
     )  # daily totals excluded, not dumped into a bucket
 
 
+def test_pulse_samples_feed_the_hr_channel():
+    """HR lives in health_pulse_samples, not sport_measurements (the real schema).
+
+    Multiple samples per 5-min bucket must average, and implausible bpm (a 0-bpm
+    dropout) must not drag that average down.
+    """
+    cfg = Config()
+    tables = _sample_tables()
+    uid = tables["glucose_entries"]["user_id"].iloc[0]
+    base = int(tables["glucose_entries"]["recorded_at"].iloc[0])
+    tables["sport_measurements"] = tables["sport_measurements"][
+        tables["sport_measurements"]["type"] != "heart_rate"
+    ]  # as in prod: no HR type here at all
+    tables["health_pulse_samples"] = pd.DataFrame(
+        [
+            {"user_id": uid, "recorded_at": base + 60_000, "bpm": 60},
+            {"user_id": uid, "recorded_at": base + 120_000, "bpm": 80},  # same bucket
+            {"user_id": uid, "recorded_at": base + 180_000, "bpm": 0},  # dropout
+        ]
+    )
+    raw = assemble_raw(tables, cfg)
+    assert raw["hr"].notna().sum() == 2  # the 0-bpm sample is dropped, not kept
+    grid = align(raw, cfg)
+    bucket = pd.to_datetime(base, unit="ms", utc=True).round(cfg.grid_freq)
+    hr = grid.loc[grid["ts_utc"] == bucket, "hr"].iloc[0]
+    assert hr == 70.0  # mean(60, 80) — not 46.7 (would include the 0)
+
+
 def test_settings_parse():
     from insulink_predictor.data.load import parse_settings
 

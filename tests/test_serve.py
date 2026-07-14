@@ -15,7 +15,12 @@ import pytest
 
 from insulink_predictor.data.align import align
 from insulink_predictor.eval.harness import build_supervised
-from insulink_predictor.models.events import build_curve_targets, train_curve_models
+from insulink_predictor.models.events import (
+    build_curve_targets,
+    conformal_offsets,
+    train_curve_models,
+    train_quantile_curve_models,
+)
 from serve import app as serve
 
 
@@ -66,6 +71,25 @@ def tiny_model() -> dict:
         "grid_minutes": serve._CFG.grid_minutes,
         "max_step": max_step,
         "predict_delta": serve._CFG.features.predict_delta,
+    }
+
+
+@pytest.fixture(scope="module")
+def banded_model(tiny_model) -> dict:
+    """``tiny_model`` plus the uncertainty band the serving path adds."""
+    grid = _ramp_grid(60)
+    sup, feature_cols = build_supervised(serve._CFG, grid)
+    max_step = max(serve._CFG.horizons_steps)
+    sup = build_curve_targets(sup, max_step)
+    delta = serve._CFG.features.predict_delta
+    qmodels = train_quantile_curve_models(
+        sup, feature_cols, max_step, (0.1, 0.9), delta
+    )
+    return {
+        **tiny_model,
+        "quantile_models": qmodels,
+        "q_offsets": conformal_offsets(qmodels, sup, feature_cols, max_step, delta),
+        "band_quantiles": [0.1, 0.9],
     }
 
 
@@ -120,11 +144,22 @@ def test_user_grid_readings_win_over_overlapping_db_bucket(monkeypatch):
 @pytest.mark.parametrize("horizon", [30, 60])
 def test_forecast_shape_and_range(monkeypatch, tiny_model, horizon):
     monkeypatch.setattr(serve, "_user_grid", lambda uid, readings: _ramp_grid(40))
-    curve, generated_at = serve.forecast("u1", horizon, model=tiny_model)
+    curve, band, generated_at = serve.forecast("u1", horizon, model=tiny_model)
     assert len(curve) == horizon // tiny_model["grid_minutes"]
     assert all(np.isfinite(curve))
     assert all(serve._GLUCOSE_LO <= v <= serve._GLUCOSE_HI for v in curve)
     assert generated_at > 0  # origin = latest bucket's epoch ms
+    assert band == {}  # a model without quantiles still serves the point curve
+
+
+def test_forecast_band_brackets_and_is_ordered(monkeypatch, banded_model):
+    monkeypatch.setattr(serve, "_user_grid", lambda uid, readings: _ramp_grid(40))
+    curve, band, _ = serve.forecast("u1", 30, model=banded_model)
+    lo, hi = band[0.1], band[0.9]
+    assert len(lo) == len(hi) == len(curve)
+    # The band must never invert — independent quantile fits can cross, so the
+    # serving path sorts them per step.
+    assert all(a <= b for a, b in zip(lo, hi))
 
 
 def test_predict_endpoint_contract(monkeypatch, tiny_model):

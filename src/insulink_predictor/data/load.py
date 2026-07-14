@@ -14,7 +14,9 @@ Confirmed against a real data sample:
 - ``events`` are **alerts** (e.g. ``glucose_high``), *derived from glucose*, so they
   are deliberately NOT used as inputs (would be circular / leaky).
 - ``sport_measurements.type`` includes ``WEIGHT`` (a user-static attribute, not a
-  30-60 min forecasting signal); only heart-rate/steps types feed the grid.
+  30-60 min forecasting signal); only heart-rate/steps types feed the grid. In
+  practice it holds only daily STEPS/DISTANCE/CALORIES + WEIGHT — no HR.
+- heart rate comes from ``health_pulse_samples.bpm`` (~1/min), its own table.
 
 Design: I/O (``connect`` / ``fetch_tables`` / ``inspect``) is separated from pure
 transformation (``assemble_raw`` and the unit/timestamp helpers) so the mapping
@@ -96,6 +98,12 @@ def _plausible_glucose(values: pd.Series) -> np.ndarray:
     """NaN out non-physiological glucose (e.g. the 1.0 no-reading placeholder)."""
     v = pd.to_numeric(values, errors="coerce").to_numpy(dtype=float)
     return np.where((v >= 20.0) & (v <= 500.0), v, np.nan)
+
+
+def _plausible_hr(values) -> np.ndarray:
+    """NaN out non-physiological heart rate (dropouts read as 0, sensor spikes)."""
+    v = pd.to_numeric(values, errors="coerce").to_numpy(dtype=float)
+    return np.where((v >= 25.0) & (v <= 240.0), v, np.nan)
 
 
 def _is_intraday(ts, grid_minutes: int) -> bool:
@@ -193,6 +201,21 @@ def assemble_raw(tables: dict[str, pd.DataFrame], cfg: Config) -> pd.DataFrame:
                 carbs_g=np.where(carbs > 0, carbs, np.nan),
                 insulin_u=pd.to_numeric(b["insulin"], errors="coerce").to_numpy(),
                 meal_flag=(carbs > 0),
+            )
+        )
+
+    # --- health_pulse_samples (the real HR source) -------------------------
+    # The dedicated pulse table, ~1 sample/min; align() means it per bucket. This
+    # is where heart rate actually lives — sport_measurements carries only daily
+    # STEPS/DISTANCE/CALORIES + WEIGHT and has never held an _HR_TYPES row, so the
+    # gate below yields nothing on this schema (kept for wearable-sourced data).
+    hp = tables.get("health_pulse_samples")
+    if hp is not None and len(hp):
+        blocks.append(
+            _channel_block(
+                hp["user_id"],
+                to_datetime_utc(hp["recorded_at"], pg.ts_unit),
+                hr=_plausible_hr(hp["bpm"]),
             )
         )
 
@@ -370,6 +393,7 @@ def fetch_tables(
             "recorded_at",
         ),
         "sport_measurements": ("user_id, recorded_at, type, value", "recorded_at"),
+        "health_pulse_samples": ("user_id, recorded_at, bpm", "recorded_at"),
         "sport_trainings": (
             "user_id, started_at, ended_at, type, distance",
             "started_at",
@@ -456,6 +480,7 @@ def inspect(cfg: Config, engine=None) -> dict:
         "glucose_entries",
         "bolus_entries",
         "sport_measurements",
+        "health_pulse_samples",
         "sport_trainings",
         "sport_workouts",
         "events",
