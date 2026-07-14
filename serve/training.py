@@ -40,7 +40,12 @@ from insulink_predictor.data.load import (
 from insulink_predictor.eval.harness import build_supervised
 from insulink_predictor.eval.metrics import rmse, skill_score
 from insulink_predictor.eval.split import chronological_split
-from insulink_predictor.models.events import build_curve_targets, train_curve_models
+from insulink_predictor.models.events import (
+    build_curve_targets,
+    conformal_offsets,
+    train_curve_models,
+    train_quantile_curve_models,
+)
 from insulink_predictor.models.tuning import tune_lgbm
 
 log = logging.getLogger("insulink.training")
@@ -60,6 +65,13 @@ PROMOTE_MIN_SKILL = float(os.environ.get("PROMOTE_MIN_SKILL", "0.0"))
 PROMOTE_TOLERANCE = float(os.environ.get("PROMOTE_TOLERANCE", "0.02"))
 # Min valid holdout rows at a horizon before its skill number is trusted.
 MIN_EVAL_ROWS = int(os.environ.get("MIN_EVAL_ROWS", "30"))
+
+# Uncertainty band served alongside the point curve. An L2 point forecast is the
+# conditional MEAN, so it is *correctly* shrunk toward the middle and almost never
+# calls <70 / >180 (measured on the real user @60 min: 1.9% / 4.3% recall). The
+# extremes live in the band, not in the point: the same rows at q10/q90 recall
+# 47.5% / 50.2% of them, at no cost to the point forecast's RMSE.
+BAND_QUANTILES = (0.1, 0.9)
 
 
 def _params_by_step(
@@ -231,8 +243,21 @@ def train_user_model(
     models = train_curve_models(
         sup, feature_cols, max_step, cfg.features.predict_delta, params_by_step=pbs
     )
+    # Uncertainty band. Fit on `train` only and conformally recalibrated on the
+    # untouched `holdout`, so the offsets measure real coverage rather than the
+    # band's own training residuals. ponytail: default params (untuned) and only
+    # the outer quantiles — tune them if the band's coverage drifts off nominal.
+    qmodels = train_quantile_curve_models(
+        train, feature_cols, max_step, BAND_QUANTILES, cfg.features.predict_delta
+    )
+    q_offsets = conformal_offsets(
+        qmodels, holdout, feature_cols, max_step, cfg.features.predict_delta
+    )
     payload = {
         "curve_models": models,
+        "quantile_models": qmodels,
+        "q_offsets": q_offsets,
+        "band_quantiles": list(BAND_QUANTILES),
         "feature_cols": feature_cols,
         "grid_minutes": cfg.grid_minutes,
         "max_step": max_step,

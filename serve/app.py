@@ -23,12 +23,22 @@ Env: ``DATABASE_URL``/``GF_PG__*`` (DB), ``MODELS_DIR`` (per-user model dir),
 ``ENABLE_SCHEDULER`` (default on), ``RETRAIN_HOUR`` (local hour, default 3).
 Run only ONE instance/worker with the scheduler enabled.
 
+Each curve point carries an uncertainty band (``lo_mgdl``/``hi_mgdl``, the
+conformally-calibrated q10/q90). The point forecast is the conditional *mean*, so
+it is correctly shrunk toward the middle and on its own almost never calls a low
+or a high; the band is what flags them (see ``training.BAND_QUANTILES``). ``risk``
+summarises the band against the 70–180 target range.
+
 Contract:
     POST /predict
       {"user_id": "<uuid>", "horizon_min": 30|60,
        "readings": [{"ts": <epoch_ms>, "mgdl": <float>}, ...]}   # readings optional
     -> {"generated_at": <epoch_ms>, "horizon_min": 30,
-        "curve": [{"offset_min": 5, "mgdl": 142.0}, ...]}
+        "curve": [{"offset_min": 5, "mgdl": 142.0,
+                   "lo_mgdl": 121.4, "hi_mgdl": 168.9}, ...],
+        "band_quantiles": [0.1, 0.9],
+        "risk": {"low": false, "high": true}}
+    Models trained before the band existed omit lo/hi, band_quantiles and risk.
 """
 
 from __future__ import annotations
@@ -54,7 +64,7 @@ from insulink_predictor.data.load import (
     to_datetime_utc,
 )
 from insulink_predictor.features.build import build_features
-from insulink_predictor.models.events import forecast_curve
+from insulink_predictor.models.events import forecast_curve, forecast_curve_quantiles
 from serve import training
 
 # Surface our INFO logs (scheduler / bootstrap / per-user training) — uvicorn only
@@ -166,20 +176,22 @@ def forecast(
     horizon_min: int,
     readings: list[Reading] | None = None,
     model: dict | None = None,
-) -> tuple[list[float], int]:
+) -> tuple[list[float], dict[float, list[float]], int]:
     """Forecast a user's mg/dL trajectory ``t+5 … t+horizon`` from their DB history.
 
     Uses the user's own model (``model`` arg, else resolved via ``_model_for``).
     ``readings`` (optional) are the freshest glucose the async DB write may not hold
-    yet; they set the forecast origin. Returns ``(trajectory, generated_at_ms)`` —
-    origin = the latest bucket. ``([], 0)`` when there is no model or no data.
+    yet; they set the forecast origin. Returns ``(trajectory, band, generated_at_ms)``
+    — origin = the latest bucket, ``band`` mapping each quantile to its trajectory
+    (empty for a model trained before the band existed). ``([], {}, 0)`` when there
+    is no model or no data.
     """
     model = model or _model_for(user_id)
     if model is None:
-        return [], 0
+        return [], {}, 0
     grid = _user_grid(user_id, readings or [])
     if grid is None:
-        return [], 0
+        return [], {}, 0
     feat, _ = build_features(grid, _CFG)
     last = feat.iloc[[-1]].copy()
     for col in model["feature_cols"]:  # reindex safety net: absent -> NaN (LGBM ok)
@@ -189,9 +201,31 @@ def forecast(
         last, model["curve_models"], model["feature_cols"], model["predict_delta"]
     )[0]
     steps = max(1, horizon_min // model["grid_minutes"])
-    trajectory = [float(np.clip(v, _GLUCOSE_LO, _GLUCOSE_HI)) for v in curve[:steps]]
+
+    def clip(c) -> list[float]:
+        return [float(np.clip(v, _GLUCOSE_LO, _GLUCOSE_HI)) for v in c[:steps]]
+
+    trajectory = clip(curve)
+
+    band: dict[float, list[float]] = {}
+    if model.get("quantile_models"):
+        qcurves = forecast_curve_quantiles(
+            last,
+            model["quantile_models"],
+            model["feature_cols"],
+            model["predict_delta"],
+        )
+        offsets = model.get("q_offsets") or {}
+        for q, c in qcurves.items():
+            band[q] = clip(c[0] + np.asarray(offsets.get(q, 0.0)))
+        # Quantile models are fit independently, so they can cross; sort per step
+        # to keep lo <= hi.
+        qs = sorted(band)
+        stacked = np.sort(np.array([band[q] for q in qs]), axis=0)
+        band = {q: list(map(float, stacked[i])) for i, q in enumerate(qs)}
+
     generated_at = int(last["ts_utc"].iloc[0].timestamp() * 1000)
-    return trajectory, generated_at
+    return trajectory, band, generated_at
 
 
 # --------------------------------------------------------------------------- #
@@ -291,17 +325,34 @@ def predict(req: PredictRequest) -> dict:
             404,
             f"no model for user {req.user_id} (not trained yet / insufficient data)",
         )
-    curve, generated_at = forecast(req.user_id, req.horizon_min, req.readings, model)
+    curve, band, generated_at = forecast(
+        req.user_id, req.horizon_min, req.readings, model
+    )
     if not curve:
         raise HTTPException(404, f"no forecastable data for user {req.user_id}")
     grid = model["grid_minutes"]
+    qs = sorted(band)
+    lo, hi = (band[qs[0]], band[qs[-1]]) if qs else (None, None)
+    point = []
+    for i, v in enumerate(curve):
+        p = {"offset_min": (i + 1) * grid, "mgdl": round(v, 1)}
+        if lo is not None:
+            p["lo_mgdl"] = round(lo[i], 1)
+            p["hi_mgdl"] = round(hi[i], 1)
+        point.append(p)
     return {
         "generated_at": generated_at,
         "horizon_min": req.horizon_min,
-        "curve": [
-            {"offset_min": (i + 1) * grid, "mgdl": round(v, 1)}
-            for i, v in enumerate(curve)
-        ],
+        "curve": point,
+        "band_quantiles": qs or None,
+        # The point curve is the conditional mean and rarely leaves 70-180; the
+        # band is what actually flags an approaching low/high.
+        "risk": {
+            "low": bool(lo is not None and min(lo) < 70),
+            "high": bool(hi is not None and max(hi) > 180),
+        }
+        if qs
+        else None,
     }
 
 
