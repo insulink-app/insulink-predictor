@@ -39,8 +39,12 @@ uv run gf load        # fetch -> align -> validate -> data/processed/grid.parque
 uv run gf load --since 2024-01-01
 ```
 
-The schema has insulin + carbs (`bolus_entries`) → a **Type-1 insulin population**,
-so COB/IOB are primary features (§7). `recorded_at` is unix-ms, `glucose` is mg/dL.
+The schema has insulin + carbs → a **Type-1 insulin population**, so COB/IOB are
+primary features (§7). They live in `nutrition_meals` (the app logs every dose as a
+meal row: `carbs`, `bolus`, `glucose`); `bolus_entries` is the Dexcom-shaped table
+and no controller writes it, so it is empty. Both are read, and a table the
+deployment does not have is skipped with a warning.
+`recorded_at` is unix-ms, `glucose` is mg/dL.
 Run `gf db-inspect` to pin the `sport_measurements` / `events` type mappings.
 
 ## Tests

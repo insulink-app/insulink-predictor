@@ -161,6 +161,57 @@ def test_assemble_raw_produces_contract_columns():
     assert raw["isf"].iloc[0] == 35.0 and raw["icr"].iloc[0] == 15.0
 
 
+def test_meals_carry_the_doses_when_bolus_entries_is_empty():
+    """The production shape: the app logs every dose as a meal row.
+
+    `bolus_entries` has an entity but no controller writing it, so COB/IOB have to
+    come from `nutrition_meals`. A meal with carbs raises meal_flag; a pure
+    correction dose (carbs 0) still contributes insulin_u but must not read as one.
+    """
+    cfg = Config()
+    tables = _sample_tables()
+    uid = tables["glucose_entries"]["user_id"].iloc[0]
+    base = int(tables["glucose_entries"]["recorded_at"].iloc[0])
+    tables["bolus_entries"] = pd.DataFrame()  # as in prod: nothing writes it
+    tables["nutrition_meals"] = pd.DataFrame(
+        {
+            "user_id": uid,
+            "time": [base + 60 * _MIN_MS, base + 300 * _MIN_MS],
+            "carbs": [45.0, 0.0],
+            "glucose": [140, 0],  # 0 = no reading available when the dose was logged
+            "bolus": [4.5, 1.5],
+        }
+    )
+    raw = assemble_raw(tables, cfg)
+    assert (raw["carbs_g"] > 0).sum() == 1
+    assert raw["meal_flag"].sum() == 1  # the correction dose is not a meal
+    assert raw["insulin_u"].notna().sum() == 2  # but it does carry insulin
+    assert raw["glucose_mgdl"].notna().sum() == 181  # 180 CGM + the one real reading
+    grid = align(raw, cfg)
+    assert grid["insulin_u"].notna().sum() >= 2
+
+
+def test_a_missing_table_is_skipped_not_fatal(monkeypatch):
+    """One absent table must not abort the fetch — and kill the nightly retrain.
+
+    Deployments run different schema versions; `assemble_raw` already degrades on
+    a missing source, so the fetch has to hand it back missing rather than raise.
+    """
+    from sqlalchemy.exc import ProgrammingError
+
+    from insulink_predictor.data import load as load_module
+
+    def fake_read_sql(sql, engine, params=None):
+        if "nutrition_meals" in str(sql):
+            raise ProgrammingError("SELECT ...", {}, Exception("relation missing"))
+        return pd.DataFrame({"recorded_at": [_epoch_ms("2024-06-01T06:00:00Z")]})
+
+    monkeypatch.setattr(load_module.pd, "read_sql", fake_read_sql)
+    out = load_module.fetch_tables(Config(), engine=object())
+    assert "nutrition_meals" not in out  # skipped, no exception
+    assert "glucose_entries" in out  # the other tables still came back
+
+
 def test_daily_aggregate_steps_are_excluded():
     """A daily STEPS total must NOT be mapped into the intraday steps channel."""
     cfg = Config()

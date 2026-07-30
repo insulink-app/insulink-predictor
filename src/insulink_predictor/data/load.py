@@ -1,16 +1,23 @@
 """Real PostgreSQL loader (ROADMAP §2 real loader; resolves §7).
 
-The production schema **has insulin and carbs** (``bolus_entries``) plus pumps and
-sensors → this is a **Type-1, insulin-using** population, not the wellness wedge.
-Consequences (§7): COB/IOB become primary predictors, and the regulatory line
-shifts toward a medical device — surface as "patterns/insights", not dosing.
+The production schema **has insulin and carbs** plus pumps and sensors → this is a
+**Type-1, insulin-using** population, not the wellness wedge. Consequences (§7):
+COB/IOB become primary predictors, and the regulatory line shifts toward a medical
+device — surface as "patterns/insights", not dosing.
+
+**Where the doses actually are: ``nutrition_meals``, not ``bolus_entries``.** The
+app logs every dose as a meal row (``carbs``, the ``bolus`` it was dosed with, and
+the ``glucose`` it was dosed at) via ``/nutrition/meals/sync/``. ``bolus_entries`` is
+the Dexcom-shaped table — its entity exists in the API but no controller writes it,
+so it is empty in production. Both are read here: same three signals, different
+column names, whichever is populated wins.
 
 Confirmed against a real data sample:
 - ``recorded_at`` is **unix epoch milliseconds**; ``glucose`` is **mg/dL** (also
   ``user_settings.content.glucose_unit == "mgdl"``).
 - CGM is **Dexcom G7** (``sensors.type``) → native 5-min cadence (grid_minutes=5).
-- ``bolus_entries.glucose`` is a real SMBG at bolus time → folded into the glucose
-  channel to enrich coverage.
+- the dose tables' ``glucose`` is the reading the bolus was calculated against →
+  folded into the glucose channel to enrich coverage.
 - ``events`` are **alerts** (e.g. ``glucose_high``), *derived from glucose*, so they
   are deliberately NOT used as inputs (would be circular / leaky).
 - ``sport_measurements.type`` includes ``WEIGHT`` (a user-static attribute, not a
@@ -28,12 +35,15 @@ unchanged.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 
 from ..config import Config, PostgresConfig
+
+log = logging.getLogger("insulink.load")
 
 # The RAW contract (identical to synth.generate's output) that align() consumes.
 RAW_COLUMNS = [
@@ -158,11 +168,51 @@ def _channel_block(user_id, ts_utc, **channels) -> pd.DataFrame:
     return pd.DataFrame(block)
 
 
+def _dose_block(
+    frame: Optional[pd.DataFrame],
+    pg: PostgresConfig,
+    time_col: str,
+    carbs_col: str,
+    insulin_col: str,
+) -> Optional[pd.DataFrame]:
+    """One carbs+insulin(+glucose) dose source mapped to RAW channels, or None.
+
+    Shared by ``bolus_entries`` and ``nutrition_meals``: the two tables carry the
+    same three signals under different column names (see the module docstring for
+    which one is populated). A correction dose has ``carbs == 0`` and still
+    contributes ``insulin_u``; only a real carb amount raises ``meal_flag``.
+    """
+    if frame is None or not len(frame):
+        return None
+    carbs = pd.to_numeric(frame[carbs_col], errors="coerce").to_numpy()
+    glucose = (
+        to_mgdl(frame["glucose"], pg.source_glucose_unit)
+        if "glucose" in frame
+        else pd.Series(np.full(len(frame), np.nan))
+    )
+    return _channel_block(
+        frame["user_id"],
+        to_datetime_utc(frame[time_col], pg.ts_unit),
+        glucose_mgdl=_plausible_glucose(glucose),  # drops no-reading placeholders
+        carbs_g=np.where(carbs > 0, carbs, np.nan),
+        insulin_u=pd.to_numeric(frame[insulin_col], errors="coerce").to_numpy(),
+        meal_flag=(carbs > 0),
+    )
+
+
+# The dose tables in the order they are mapped: (table, time, carbs, insulin).
+_DOSE_SOURCES = (
+    ("bolus_entries", "recorded_at", "carbohydrates", "insulin"),
+    ("nutrition_meals", "time", "carbs", "bolus"),
+)
+
+
 def assemble_raw(tables: dict[str, pd.DataFrame], cfg: Config) -> pd.DataFrame:
     """Map fetched tables into the RAW contract frame (pure; align-ready).
 
-    ``tables`` may contain: glucose_entries, bolus_entries, sport_measurements,
-    sport_trainings, sport_workouts. Missing tables/channels degrade cleanly.
+    ``tables`` may contain: glucose_entries, bolus_entries, nutrition_meals,
+    sport_measurements, sport_trainings, sport_workouts. Missing tables/channels
+    degrade cleanly.
     """
     pg = cfg.pg
     blocks: list[pd.DataFrame] = []
@@ -180,29 +230,15 @@ def assemble_raw(tables: dict[str, pd.DataFrame], cfg: Config) -> pd.DataFrame:
             )
         )
 
-    # --- bolus (carbs + insulin => COB/IOB, now primary) -------------------
-    # Also carries the pre-bolus SMBG (bolus_entries.glucose) — a real glucose
-    # reading that enriches the CGM channel and fills gaps.
-    b = tables.get("bolus_entries")
-    if b is not None and len(b):
-        carbs = pd.to_numeric(b["carbohydrates"], errors="coerce").to_numpy()
-        smbg = (
-            to_mgdl(b["glucose"], pg.source_glucose_unit)
-            if "glucose" in b
-            else pd.Series(np.full(len(b), np.nan))
-        )
-        blocks.append(
-            _channel_block(
-                b["user_id"],
-                to_datetime_utc(b["recorded_at"], pg.ts_unit),
-                glucose_mgdl=_plausible_glucose(
-                    smbg
-                ),  # drops no-reading placeholders (e.g. 1.0)
-                carbs_g=np.where(carbs > 0, carbs, np.nan),
-                insulin_u=pd.to_numeric(b["insulin"], errors="coerce").to_numpy(),
-                meal_flag=(carbs > 0),
-            )
-        )
+    # --- doses (carbs + insulin => COB/IOB, the primary predictors) --------
+    # Both dose tables are read; on this schema `nutrition_meals` is the one
+    # that is populated.
+    # Each also carries the glucose the dose was calculated against, which
+    # enriches the CGM channel and fills gaps.
+    for table, time_col, carbs_col, insulin_col in _DOSE_SOURCES:
+        dose = _dose_block(tables.get(table), pg, time_col, carbs_col, insulin_col)
+        if dose is not None:
+            blocks.append(dose)
 
     # --- health_pulse_samples (the real HR source) -------------------------
     # The dedicated pulse table, ~1 sample/min; align() means it per bucket. This
@@ -392,6 +428,9 @@ def fetch_tables(
             "user_id, recorded_at, carbohydrates, insulin, glucose, carbohydrate_ratio, insulin_type",
             "recorded_at",
         ),
+        # `time` is quoted: it is a type name, so an unquoted column reference is
+        # ambiguous in some clause positions.
+        "nutrition_meals": ('user_id, "time", carbs, glucose, bolus', '"time"'),
         "sport_measurements": ("user_id, recorded_at, type, value", "recorded_at"),
         "health_pulse_samples": ("user_id, recorded_at, bpm", "recorded_at"),
         "sport_trainings": (
@@ -400,11 +439,20 @@ def fetch_tables(
         ),
         "sport_workouts": ("user_id, started_at", "started_at"),
     }
+    # A table the deployment does not have is skipped, not fatal: the schema
+    # evolves per module and `assemble_raw` already degrades cleanly on a missing
+    # source. Logged as a warning so a typo'd or renamed table stays visible
+    # instead of silently emptying a channel.
+    from sqlalchemy.exc import ProgrammingError
+
     out: dict[str, pd.DataFrame] = {}
     for name, (cols, time_col) in specs.items():
         clause, params = where(time_col)
         sql = text(f"SELECT {cols} FROM {_q(pg.db_schema, name)}{clause}")
-        out[name] = pd.read_sql(sql, engine, params=params)
+        try:
+            out[name] = pd.read_sql(sql, engine, params=params)
+        except ProgrammingError as exc:
+            log.warning("table %s unavailable, skipping: %s", name, exc.orig or exc)
 
     # user_settings has no recorded_at → fetch per user (for ISF/ICR therapy features)
     ucl = (
@@ -479,6 +527,7 @@ def inspect(cfg: Config, engine=None) -> dict:
     for name in [
         "glucose_entries",
         "bolus_entries",
+        "nutrition_meals",
         "sport_measurements",
         "health_pulse_samples",
         "sport_trainings",
