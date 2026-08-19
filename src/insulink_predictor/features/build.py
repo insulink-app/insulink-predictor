@@ -28,6 +28,30 @@ def _has_channel(df: pd.DataFrame, col: str) -> bool:
     return col in df.columns and bool(df[col].notna().any())
 
 
+def _has_insulin(df: pd.DataFrame) -> bool:
+    """Whether any insulin at all is known — a bolus, a basal drip, or both."""
+    return _has_channel(df, "insulin_u") or _has_channel(df, "basal_u")
+
+
+def _total_insulin(df: pd.DataFrame) -> pd.Series:
+    """Every unit that entered the body per bucket: boluses plus the basal drip.
+
+    Kept separate from ``insulin_u`` on purpose. ``insulin_u`` is the DISCRETE-dose
+    channel and drives ``_bolus_flag`` / ``time_since_bolus``; folding a continuous
+    drip into it would make "a bolus happened" true in every single bucket and
+    destroy both features. Summing is only correct where the quantity is a stock of
+    insulin — insulin on board and its rate of action — which is where this is used.
+    """
+    total = (
+        df["insulin_u"].fillna(0.0)
+        if "insulin_u" in df.columns
+        else pd.Series(0.0, index=df.index)
+    )
+    if "basal_u" in df.columns:
+        total = total + df["basal_u"].fillna(0.0)
+    return total
+
+
 def _time_since(df: pd.DataFrame, flag_col: str) -> pd.Series:
     """Minutes since the most recent True in ``flag_col`` (per user, causal)."""
     marked_ts = df["ts_utc"].where(df[flag_col].astype(bool))
@@ -205,9 +229,22 @@ def build_features(df: pd.DataFrame, cfg: Config) -> tuple[pd.DataFrame, list[st
     if fc.use_carbs and _has_channel(df, "carbs_g"):
         df["cob"] = _decay_accumulate(df, "carbs_g", fc.cob_tau_min, grid)
         cols.append("cob")
-    if fc.use_insulin and _has_channel(df, "insulin_u"):
-        df["iob"] = _decay_accumulate(df, "insulin_u", fc.iob_tau_min, grid)
+    # Gated on EITHER channel: a pump user between boluses still has basal on
+    # board, and gating on `insulin_u` alone would leave them with no IOB at all —
+    # which is precisely the stretch where basal is the only insulin acting.
+    if fc.use_insulin and _has_insulin(df):
+        # Insulin on board is built from EVERY unit that entered the body, which on
+        # a pump means the basal drip as well. Basal is often about half a day's
+        # insulin, so an IOB built from boluses alone is built from half the
+        # insulin — the single biggest gap this channel closes.
+        df["_insulin_total"] = _total_insulin(df)
+        df["iob"] = _decay_accumulate(df, "_insulin_total", fc.iob_tau_min, grid)
         cols.append("iob")
+    if fc.use_insulin and _has_channel(df, "basal_u"):
+        # The current basal rate is its own signal: a temp-basal reduction before
+        # sport is a deliberate intervention the model can otherwise not see.
+        df["basal_now"] = df["basal_u"].fillna(0.0)
+        cols.append("basal_now")
     if fc.use_hr and _has_channel(df, "hr"):
         df["hr_now"] = df["hr"]
         cols.append("hr_now")
@@ -234,8 +271,11 @@ def build_features(df: pd.DataFrame, cfg: Config) -> tuple[pd.DataFrame, list[st
             cols.append("iob_glucose")
         # Activity (rate of action) in glucose units — the near-term pressure that
         # drives the *change*, which IOB/COB stock misses.
-        if _has_channel(df, "insulin_u"):
-            act = _activity(df, "insulin_u", fc.ins_activity_tau_min, grid)
+        if _has_insulin(df):
+            # Same reasoning as IOB: the rate of insulin action is driven by all of
+            # it, not only by the boluses.
+            df["_insulin_total"] = _total_insulin(df)
+            act = _activity(df, "_insulin_total", fc.ins_activity_tau_min, grid)
             df["ins_activity"] = act * df["isf"]
             cols.append("ins_activity")
         if _has_channel(df, "carbs_g"):

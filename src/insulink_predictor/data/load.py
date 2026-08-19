@@ -5,6 +5,13 @@ The production schema **has insulin and carbs** plus pumps and sensors → this 
 COB/IOB become primary predictors, and the regulatory line shifts toward a medical
 device — surface as "patterns/insights", not dosing.
 
+**Basal arrives on its own channel.** ``basal_entries`` holds units delivered per
+window by the pump driver (``/insulin/basal/sync/``), mapped to ``basal_u``. It is
+deliberately NOT merged into ``insulin_u``: that channel drives the discrete-dose
+features, and a continuous drip in it would make "a bolus happened" true in every
+bucket. ``features.build`` sums the two only where summing is correct — insulin on
+board and its rate of action.
+
 **Where the doses actually are: ``nutrition_meals``, not ``bolus_entries``.** The
 app logs every dose as a meal row (``carbs``, the ``bolus`` it was dosed with, and
 the ``glucose`` it was dosed at) via ``/nutrition/meals/sync/``. ``bolus_entries`` is
@@ -54,6 +61,7 @@ RAW_COLUMNS = [
     "meal_flag",
     "carbs_g",
     "insulin_u",
+    "basal_u",
     "steps",
     "activity_flag",
     "hr",
@@ -157,6 +165,7 @@ def _channel_block(user_id, ts_utc, **channels) -> pd.DataFrame:
         "meal_flag": np.zeros(n, dtype=bool),
         "carbs_g": np.full(n, np.nan),
         "insulin_u": np.full(n, np.nan),
+        "basal_u": np.full(n, np.nan),
         "steps": np.full(n, np.nan),
         "activity_flag": np.zeros(n, dtype=bool),
         "hr": np.full(n, np.nan),
@@ -207,12 +216,41 @@ _DOSE_SOURCES = (
 )
 
 
+def _basal_block(
+    frame: Optional[pd.DataFrame], pg: PostgresConfig
+) -> Optional[pd.DataFrame]:
+    """``basal_entries`` mapped to the ``basal_u`` channel, or None.
+
+    Basal is written by the pump driver as *units delivered in the window that just
+    ended* (``insulin``, stamped at the window end) — not as a rate. So it lands on
+    its own channel and is summed per bucket exactly like a bolus, because that is
+    what it is: insulin that entered the body in that stretch of time.
+
+    It is deliberately NOT merged into ``insulin_u``. The bolus channel drives the
+    discrete-dose features (``_bolus_flag``, ``time_since_bolus``); a continuous drip
+    added to it would make "a bolus happened" true in every bucket. The two are
+    summed where it is correct to sum them — insulin on board — in
+    ``features.build``.
+
+    The ``glucose`` column is ignored: a basal delivery has no glucose input that
+    fed a calculation, and the API stores a zero there.
+    """
+    if frame is None or not len(frame):
+        return None
+    units = pd.to_numeric(frame["insulin"], errors="coerce").to_numpy()
+    return _channel_block(
+        frame["user_id"],
+        to_datetime_utc(frame["recorded_at"], pg.ts_unit),
+        basal_u=np.where(units > 0, units, np.nan),
+    )
+
+
 def assemble_raw(tables: dict[str, pd.DataFrame], cfg: Config) -> pd.DataFrame:
     """Map fetched tables into the RAW contract frame (pure; align-ready).
 
     ``tables`` may contain: glucose_entries, bolus_entries, nutrition_meals,
-    sport_measurements, sport_trainings, sport_workouts. Missing tables/channels
-    degrade cleanly.
+    basal_entries, sport_measurements, sport_trainings, sport_workouts. Missing
+    tables/channels degrade cleanly.
     """
     pg = cfg.pg
     blocks: list[pd.DataFrame] = []
@@ -239,6 +277,12 @@ def assemble_raw(tables: dict[str, pd.DataFrame], cfg: Config) -> pd.DataFrame:
         dose = _dose_block(tables.get(table), pg, time_col, carbs_col, insulin_col)
         if dose is not None:
             blocks.append(dose)
+
+    # --- basal (the continuous drip, ~half of a pump user's daily insulin) ---
+    # Its own channel so it reaches IOB without polluting the bolus-edge features.
+    basal = _basal_block(tables.get("basal_entries"), pg)
+    if basal is not None:
+        blocks.append(basal)
 
     # --- health_pulse_samples (the real HR source) -------------------------
     # The dedicated pulse table, ~1 sample/min; align() means it per bucket. This
@@ -431,6 +475,8 @@ def fetch_tables(
         # `time` is quoted: it is a type name, so an unquoted column reference is
         # ambiguous in some clause positions.
         "nutrition_meals": ('user_id, "time", carbs, glucose, bolus', '"time"'),
+        # Basal delivered per window by the pump driver, stamped at the window end.
+        "basal_entries": ("user_id, recorded_at, insulin", "recorded_at"),
         "sport_measurements": ("user_id, recorded_at, type, value", "recorded_at"),
         "health_pulse_samples": ("user_id, recorded_at, bpm", "recorded_at"),
         "sport_trainings": (
@@ -528,6 +574,7 @@ def inspect(cfg: Config, engine=None) -> dict:
         "glucose_entries",
         "bolus_entries",
         "nutrition_meals",
+        "basal_entries",
         "sport_measurements",
         "health_pulse_samples",
         "sport_trainings",

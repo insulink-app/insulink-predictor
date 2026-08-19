@@ -49,6 +49,12 @@ def _align_user(sub: pd.DataFrame, cfg: Config) -> pd.DataFrame:
         }
     ).reindex(grid)
 
+    # Basal is summed per bucket, not meaned: it is units that entered the body in
+    # that stretch, exactly like a bolus. Optional, so a dataset without a pump
+    # (or the synthetic one) simply has no such column.
+    if "basal_u" in sub.columns:
+        agg["basal_u"] = g["basal_u"].sum(min_count=1).reindex(grid)
+
     # a bucket with no reading is a sensor gap (marked before any interpolation)
     sensor_gap = agg["glucose_mgdl"].isna()
 
@@ -79,6 +85,9 @@ def _align_user(sub: pd.DataFrame, cfg: Config) -> pd.DataFrame:
             "sensor_gap": sensor_gap.to_numpy(),
         }
     )
+    if "basal_u" in agg.columns:
+        out["basal_u"] = agg["basal_u"].to_numpy()
+
     # Carry per-user therapy settings through unchanged (constant per user).
     for col in ("isf", "icr"):
         if col in sub.columns:
