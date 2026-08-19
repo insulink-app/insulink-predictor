@@ -40,6 +40,11 @@ GRID_SCHEMA = pa.DataFrameSchema(
         "insulin_u": pa.Column(
             float, checks=pa.Check.ge(0), nullable=True, required=False
         ),
+        # Basal delivered per bucket, from a pump. Its own channel so the
+        # discrete-dose features stay driven by `insulin_u` alone.
+        "basal_u": pa.Column(
+            float, checks=pa.Check.ge(0), nullable=True, required=False
+        ),
         "steps": pa.Column("int64", checks=pa.Check.ge(0), nullable=False),
         "activity_flag": pa.Column(bool, nullable=False, required=False),
         "hr": pa.Column(float, checks=pa.Check.ge(0), nullable=True, required=False),
