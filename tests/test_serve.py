@@ -321,3 +321,19 @@ def test_backtest_404_when_user_has_no_model(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         serve.backtest_endpoint(serve.BacktestRequest(user_id="ghost"))
     assert exc.value.status_code == 404
+
+
+def test_backtest_answer_is_json_serialisable(monkeypatch, banded_model):
+    """A numpy value would pass the handler and fail only when FastAPI encodes it."""
+    import json
+
+    from fastapi.encoders import jsonable_encoder
+
+    monkeypatch.setattr(serve, "_model_for", lambda uid: banded_model)
+    monkeypatch.setattr(serve, "_user_grid", lambda uid, readings: _ramp_grid(60))
+
+    resp = serve.backtest_endpoint(
+        serve.BacktestRequest(user_id="u1", horizon_min=30, hours=2)
+    )
+
+    assert json.loads(json.dumps(jsonable_encoder(resp)))["points"]
