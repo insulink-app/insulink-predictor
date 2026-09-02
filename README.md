@@ -47,6 +47,31 @@ deployment does not have is skipped with a warning.
 `recorded_at` is unix-ms, `glucose` is mg/dL.
 Run `gf db-inspect` to pin the `sport_measurements` / `events` type mappings.
 
+The pump contributes two channels: `basal_entries` -> `basal_u` (the drip, roughly
+half a pump user's daily insulin, summed into IOB but never into the bolus-edge
+features) and `pumps.registered_at` -> `time_since_pod` (pod age, because a cannula
+absorbs worse the longer it sits). 
+Activity is the deployment's weak spot: `sport_measurements` holds daily totals
+only and workouts were logged 36 times in 306 days, so `steps_*`, `workout_flag`
+and `time_since_activity` all score 0.0 gain on real data. Two channels fill it,
+both continuous:
+
+- **Heart rate** — `health_pulse_samples`, the durable minute curve pushed by the
+  CGM background service (the 1 Hz live relay is a memory-only cache in the API and
+  never reaches the predictor). Dense: 93 % of buckets in the era it covers. Read
+  by default via `hr_now` and worth +0.006 skill @30 there. `use_hr_dynamics` adds
+  a personal resting baseline and nearly doubles that, but only once heart rate
+  fills more of the training history — off for now.
+- **GPS** — `location_entries`, written by the app's background sampler. Gives
+  movement (`gps_speed`, `gps_dist_*`, `gps_settled_min`) and `place_familiarity`:
+  the share of the user's own recent past spent where they are now. Unsupervised —
+  no home address is declared and no coordinate is a feature. Measured negative at
+  50 % coverage, so it stays behind `use_gps: false`.
+
+Every number here is a paired walk-forward lift on real data; the measurements,
+their caveats and the two corrections they forced are in
+[`reports/tables/wearable_channel_notes.md`](reports/tables/wearable_channel_notes.md).
+
 ## Tests
 
 ```bash

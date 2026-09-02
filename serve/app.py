@@ -92,6 +92,19 @@ _SCHEDULER_ENABLED = os.environ.get("ENABLE_SCHEDULER", "true").lower() in (
 )
 _RETRAIN_HOUR = int(os.environ.get("RETRAIN_HOUR", "3"))  # local hour of day, 0-23
 
+# How far back a /predict request reads. Without it every request drags a user's
+# ENTIRE history across the wire to use one row of it — and health_pulse_samples
+# alone grows at ~1 row per minute, so the unbounded read gets worse every day.
+#
+# The floor is what the features need: 3 days for steps_3d_avg, and
+# place_familiarity counts over its own configured window, which is why that is
+# read from the config rather than guessed. Anything longer than the deepest
+# feature lookback produces byte-identical features to the full history; anything
+# SHORTER would silently change what a feature means between training and serving.
+SERVE_WINDOW_DAYS = int(os.environ.get("SERVE_WINDOW_DAYS", "0")) or max(
+    14, _CFG.features.place_window_days
+)
+
 
 class Reading(BaseModel):
     ts: int  # epoch milliseconds
@@ -148,8 +161,14 @@ def _user_grid(user_id: str, readings: list[Reading]) -> pd.DataFrame | None:
     being fed from both sources (``align`` would otherwise average them), any DB
     glucose row whose 5-min bucket a reading also covers is dropped first — the
     fresher request value wins. ``None`` when there is no forecastable data (no CGM).
+
+    Only the last ``SERVE_WINDOW_DAYS`` are read: the forecast uses one row, and no
+    feature reaches further back than 3 days. A user whose CGM has been silent for
+    longer than the window therefore gets a 404 rather than a forecast anchored to
+    a weeks-old tip, which is the right answer either way.
     """
-    tables = fetch_tables(_CFG, engine=_engine(), user_ids=[user_id])
+    since = pd.Timestamp.utcnow() - pd.Timedelta(days=SERVE_WINDOW_DAYS)
+    tables = fetch_tables(_CFG, engine=_engine(), since=since, user_ids=[user_id])
     if readings:
         tip = pd.DataFrame(
             {

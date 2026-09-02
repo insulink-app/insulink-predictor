@@ -55,6 +55,19 @@ def _align_user(sub: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     if "basal_u" in sub.columns:
         agg["basal_u"] = g["basal_u"].sum(min_count=1).reindex(grid)
 
+    # A pod activation is a rare pulse, so the bucket it lands in is all that is
+    # needed; build_features turns it into time_since_pod. Optional, like basal.
+    if "pod_flag" in sub.columns:
+        agg["pod_flag"] = g["pod_flag"].any().reindex(grid)
+
+    # A bucket's position is the mean of its fixes — five minutes of standing still
+    # produces a handful of jittering fixes around one spot, and their mean is that
+    # spot. ponytail: a plain mean is wrong across the ±180° meridian; nobody
+    # forecasts glucose there, and a fix-count-weighted circular mean is the fix.
+    for col in ("lat", "lon"):
+        if col in sub.columns:
+            agg[col] = g[col].mean().reindex(grid)
+
     # a bucket with no reading is a sensor gap (marked before any interpolation)
     sensor_gap = agg["glucose_mgdl"].isna()
 
@@ -87,6 +100,11 @@ def _align_user(sub: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     )
     if "basal_u" in agg.columns:
         out["basal_u"] = agg["basal_u"].to_numpy()
+    if "pod_flag" in agg.columns:
+        out["pod_flag"] = agg["pod_flag"].eq(True).to_numpy()
+    for col in ("lat", "lon"):
+        if col in agg.columns:
+            out[col] = agg[col].to_numpy()
 
     # Carry per-user therapy settings through unchanged (constant per user).
     for col in ("isf", "icr"):

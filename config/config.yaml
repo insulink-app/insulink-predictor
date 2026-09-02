@@ -12,7 +12,38 @@ features:
   steps_windows_min: [15, 30, 60]
   use_carbs: true          # optional COB proxy (§7.1) — degrades cleanly if absent
   use_insulin: true        # optional IOB proxy (§7.1) — degrades cleanly if absent
-  use_hr: true
+  use_hr: true             # raw bpm from health_pulse_samples; on when the band syncs
+  # Derived heart-rate channels: hr_excess (how far above this user's own resting
+  # level, against a trailing low quantile) + hr_activity (accumulated exercise
+  # pressure that outlasts the elevation, same kernel as insulin/carbs).
+  #
+  # Measured on REAL data 2026-08-23 (reports/tables/wearable_channel_notes.md).
+  # In the era the band covers it is clearly the better design: +0.0109 skill @30
+  # over no HR at all, and +0.0050 @30 in 9/10 folds over the plain hr_now.
+  # But production trains on the user's WHOLE history, where HR fills only 13 % of
+  # rows, and there the two become indistinguishable (+0.0023 vs +0.0018). Bounding
+  # the training window to recover it backfires (-0.0017, worst fold below
+  # persistence), so there is nothing to build: the dilution cures itself as the
+  # band accumulates history. Re-run the comparison once HR covers more than half
+  # the history, and flip this then.
+  use_hr_dynamics: false
+  hr_rest_window_min: 1440
+  hr_activity_tau_min: 45.0
+  # GPS from location_entries: continuous background sampler, the only intraday
+  # movement signal here (intraday steps are empty, workouts logged 36 times in 306
+  # days). Gives gps_speed, trailing gps_dist_*, gps_settled_min, plus
+  # place_familiarity — the share of this user's own recent past spent where they
+  # are now. Unsupervised by design: nobody declares a home address and no
+  # coordinate becomes a feature.
+  #
+  # Measured on REAL data 2026-08-23: it HURTS, -0.0071 skill @60 in 0/5 folds.
+  # Coverage is the likely cause (50 % of buckets, median 42 %/day), made worse by
+  # gps_dist_* filling a missing fix with zero, so a GPS blackout reads as standing
+  # still rather than unknown. Fix the coverage or that fill before retrying.
+  use_gps: false
+  place_cell_deg: 0.002          # ~200 m cells, counted with their 8 neighbours
+  settled_speed_m_per_min: 20.0  # below this the user counts as settled
+  place_window_days: 14          # familiarity is counted over this trailing window
   use_weather: true        # expected low importance — measured, not believed (§3)
   cob_tau_min: 45.0        # carbs-on-board exponential decay
   iob_tau_min: 55.0        # insulin-on-board exponential decay

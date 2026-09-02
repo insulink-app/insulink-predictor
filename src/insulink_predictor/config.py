@@ -82,6 +82,46 @@ class FeatureConfig(BaseModel):
     # re-test with `gf backtest` on multi-user data.
     use_daily_activity: bool = False
 
+    # Heart-rate dynamics. Raw ``hr_now`` is nearly useless on its own: 70 bpm
+    # means a different thing per user and per time of day. What predicts the
+    # coming glucose drop is how far above this user's OWN rest the heart is
+    # (``hr_excess``, measured against a trailing low quantile — causal and
+    # self-calibrating) and the accumulated exercise pressure that OUTLASTS the
+    # elevation (``hr_activity``, the same t·exp(-t/tau) rate-of-action shape used
+    # for insulin and carbs).
+    #
+    # OFF by default like every other candidate channel: enable only after a paired
+    # walk-forward shows a lift on data where heart rate is actually co-observed
+    # with glucose. Degrades cleanly (features absent) when there is no HR at all.
+    use_hr_dynamics: bool = False
+    hr_rest_window_min: int = 1440  # trailing window for the personal rest level
+    hr_activity_tau_min: float = 45.0
+
+    # GPS. The app's background sampler writes ``location_entries`` all day, which
+    # makes it the only CONTINUOUS movement signal here: intraday steps are empty
+    # and logged workouts are rare (36 sessions in 306 days of real data), so a
+    # walk into town reaches the model through this channel or not at all.
+    #
+    # Two questions come out of one log. How much is the user moving right now —
+    # ``gps_speed``, the trailing ``gps_dist_*`` and ``gps_settled_min``, the
+    # replacement for the dead steps channel. And how ordinary is the place they
+    # are in — ``place_familiarity``, the share of their own past that was spent in
+    # this spot. That one is deliberately unsupervised: nobody declares a home
+    # address, and no coordinate ever becomes a feature. A routine place scores
+    # near its usual share; a place the user has never been scores ~0.
+    #
+    # OFF by default, like every unvalidated channel. There is no GPS in the
+    # synthetic generator, so unlike heart rate this cannot be A/B-ed before real
+    # location data is in the grid: flip it on and run `gf backtest` then.
+    use_gps: bool = False
+    place_cell_deg: float = 0.002  # ~200 m cells — GPS jitter must not split a place
+    settled_speed_m_per_min: float = 20.0  # below this the user counts as settled
+    # Trailing window place_familiarity is counted over. Bounded so the feature
+    # means the same thing in training as at inference, where only a slice of the
+    # DB is read (serve/app.py sizes its window from this) — and so somebody who
+    # moves house stops being a stranger in their own street after a few weeks.
+    place_window_days: int = 14
+
     # Model the CHANGE over persistence (target = y_{t+h} − g_t) instead of the
     # absolute level. The regularized learner shrinks the delta toward ~0 when
     # there's no signal, so quiet periods fall back to persistence instead of

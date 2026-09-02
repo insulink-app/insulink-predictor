@@ -16,6 +16,7 @@ Notes on causality:
 from __future__ import annotations
 
 import math
+from collections import deque
 
 import numpy as np
 import pandas as pd
@@ -108,6 +109,146 @@ def _activity(
     )
 
 
+def _hr_dynamics(df: pd.DataFrame, fc, grid_min: int) -> list[str]:
+    """Add ``hr_excess`` / ``hr_activity`` in place; return the new column names.
+
+    A bpm on its own carries almost no signal: 70 means rest for one user and
+    effort for another. Two derived channels do carry it.
+
+    ``hr_excess`` is how far the heart is above THIS user's own rest right now.
+    Rest is a trailing low quantile of their own recent heart rate, so it is
+    causal (the window ends at t), needs no extra data source, and re-calibrates
+    itself as fitness or a sensor changes. ``hr_activity`` is the accumulated
+    exercise pressure: glucose keeps falling long after the heart has come back
+    down, so the stock of recent effort predicts the next 30-60 min better than
+    the instantaneous value. It reuses the same t·exp(-t/tau) rate-of-action
+    kernel that carries insulin and carbs.
+
+    ponytail: the rest level is a rolling quantile, not the measured resting heart
+    rate. ``health_days`` carries one (``rhr``, from Health Connect) — swap it in
+    if the quantile proves too coarse, at the cost of a second data source.
+    """
+    if not fc.use_hr_dynamics:
+        return []
+    window = max(1, fc.hr_rest_window_min // grid_min)
+    rest = df.groupby("user_id", sort=False)["hr"].transform(
+        lambda s: s.rolling(window, min_periods=max(1, window // 12)).quantile(0.1)
+    )
+    df["hr_excess"] = (df["hr"] - rest).clip(lower=0.0)
+    df["hr_activity"] = _activity(df, "hr_excess", fc.hr_activity_tau_min, grid_min)
+    return ["hr_excess", "hr_activity"]
+
+
+def _haversine_step_m(df: pd.DataFrame) -> pd.Series:
+    """Metres between each bucket's position and the previous one, per user.
+
+    NaN wherever either end has no fix, so "the phone had no position" stays
+    distinguishable from "the user did not move" — the model can split on it.
+    """
+    lat = np.radians(df["lat"].to_numpy(dtype=float))
+    lon = np.radians(df["lon"].to_numpy(dtype=float))
+    prev_lat = pd.Series(lat).groupby(df["user_id"].to_numpy()).shift(1).to_numpy()
+    prev_lon = pd.Series(lon).groupby(df["user_id"].to_numpy()).shift(1).to_numpy()
+    dlat, dlon = lat - prev_lat, lon - prev_lon
+    a = np.sin(dlat / 2) ** 2 + np.cos(prev_lat) * np.cos(lat) * np.sin(dlon / 2) ** 2
+    return pd.Series(6_371_000.0 * 2 * np.arcsin(np.sqrt(a)), index=df.index)
+
+
+def _place_familiarity(df: pd.DataFrame, fc, grid_min: int) -> pd.Series:
+    """Share of this user's PAST located buckets spent where they are now.
+
+    The position is quantized to a coarse cell and the count is taken over that
+    cell AND its eight neighbours. The neighbourhood is not padding: a hard grid
+    puts a boundary through some users' living rooms, and GPS jitter then splits
+    one place into two — which is exactly what the jitter test caught. Counting
+    the ring makes the feature depend on the distance between two positions rather
+    than on where the arbitrary grid lines happen to fall.
+
+    Strictly causal: every count is incremented only after the row that reads it,
+    so a bucket sees the past and nothing else. Bounded in [0, 1] as a share, which
+    also keeps out the slow upward drift a raw visit count would carry (a tree
+    could mistake that for a time trend). NaN wherever there is no fix.
+
+    The past it counts is a BOUNDED trailing window, not all of history, for two
+    reasons. Serving reads a fixed slice of the DB, so an unbounded count would
+    mean one thing in training and another at inference — the same feature name
+    carrying a different quantity, which is the quiet kind of bug. And a bounded
+    window re-calibrates: somebody who moves house should stop being a stranger in
+    their own street after a few weeks.
+
+    Unsupervised on purpose: no home address is ever declared and no coordinate is
+    ever a feature. Somewhere the user spends their life scores high, somewhere
+    they have never been scores ~0, and the model gets to find out whether the
+    difference shows up in their glucose.
+    """
+    size = fc.place_cell_deg
+    out = np.full(len(df), np.nan)
+    lat = df["lat"].to_numpy(dtype=float)
+    lon = df["lon"].to_numpy(dtype=float)
+    ring = [(dx, dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)]
+
+    window = max(1, fc.place_window_days * 1440 // grid_min)
+
+    for positions in df.groupby("user_id", sort=False).indices.values():
+        counts: dict[tuple[int, int], int] = {}
+        recent: deque[tuple[int, int]] = deque()
+        for row in positions:
+            if np.isnan(lat[row]) or np.isnan(lon[row]):
+                continue
+            cell = (int(np.floor(lat[row] / size)), int(np.floor(lon[row] / size)))
+            if recent:
+                nearby = sum(
+                    counts.get((cell[0] + dx, cell[1] + dy), 0) for dx, dy in ring
+                )
+                out[row] = nearby / len(recent)
+            counts[cell] = counts.get(cell, 0) + 1
+            recent.append(cell)
+            if len(recent) > window:
+                dropped = recent.popleft()
+                counts[dropped] -= 1
+                if not counts[dropped]:
+                    del counts[dropped]
+    return pd.Series(out, index=df.index)
+
+
+def _gps(df: pd.DataFrame, fc, grid_min: int) -> list[str]:
+    """Add the movement and place features in place; return the new column names."""
+    if not fc.use_gps or not (_has_channel(df, "lat") and _has_channel(df, "lon")):
+        return []
+    step_m = _haversine_step_m(df)
+    df["gps_speed"] = step_m / grid_min  # metres per minute
+    cols = ["gps_speed"]
+
+    # Trailing distance actually covered. A bucket with no fix contributes nothing
+    # rather than NaN — ponytail: that reads a GPS blackout as standing still, which
+    # is the conservative error; ffill the position first if blackouts turn out to
+    # matter.
+    moved = step_m.fillna(0.0)
+    grouped_move = moved.groupby(df["user_id"], sort=False)
+    for w_min in fc.steps_windows_min:
+        w = max(1, w_min // grid_min)
+        name = f"gps_dist_{w_min}"
+        df[name] = grouped_move.transform(
+            lambda s, w=w: s.rolling(w, min_periods=1).sum()
+        )
+        cols.append(name)
+
+    # How long the user has been settled. Movement raises insulin sensitivity for
+    # hours, so "stopped walking 20 minutes ago" is a different state from "has been
+    # sitting since noon" even though both read zero speed right now.
+    window = max(1, 15 // grid_min)
+    recent = grouped_move.transform(
+        lambda s, w=window: s.rolling(w, min_periods=1).sum()
+    )
+    df["_moving_flag"] = recent > fc.settled_speed_m_per_min * 15
+    df["gps_settled_min"] = _time_since(df, "_moving_flag")
+    cols.append("gps_settled_min")
+
+    df["place_familiarity"] = _place_familiarity(df, fc, grid_min)
+    cols.append("place_familiarity")
+    return cols
+
+
 def build_features(df: pd.DataFrame, cfg: Config) -> tuple[pd.DataFrame, list[str]]:
     """Return ``(df_with_features, feature_cols)``. Input is the aligned grid."""
     fc = cfg.features
@@ -149,6 +290,14 @@ def build_features(df: pd.DataFrame, cfg: Config) -> tuple[pd.DataFrame, list[st
         df["_bolus_flag"] = df["insulin_u"].fillna(0.0) > 0
         df["time_since_bolus"] = _time_since(df, "_bolus_flag")
         cols.append("time_since_bolus")
+    # Pod age. A cannula sits in one spot for three days and the spot absorbs worse
+    # as it ages, so the same units act more slowly late in a pod's life. This is
+    # the one thing the pump knows that nothing else does.
+    # .any() rather than _has_channel: an all-False flag column means no pod was
+    # ever recorded, and time_since_pod would be NaN in every row.
+    if "pod_flag" in df.columns and bool(df["pod_flag"].any()):
+        df["time_since_pod"] = _time_since(df, "pod_flag")
+        cols.append("time_since_pod")
 
     # --- circadian (from local wall-clock) ----------------------------------
     hour = df["ts_local"].dt.hour + df["ts_local"].dt.minute / 60.0
@@ -248,6 +397,8 @@ def build_features(df: pd.DataFrame, cfg: Config) -> tuple[pd.DataFrame, list[st
     if fc.use_hr and _has_channel(df, "hr"):
         df["hr_now"] = df["hr"]
         cols.append("hr_now")
+        cols += _hr_dynamics(df, fc, grid)
+    cols += _gps(df, fc, grid)
     if fc.use_weather and _has_channel(df, "weather_temp"):
         df["weather_now"] = df["weather_temp"]
         cols.append("weather_now")

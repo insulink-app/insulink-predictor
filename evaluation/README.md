@@ -58,6 +58,26 @@ All CDF scripts write to `reports/cdf/`:
 | `cdf_recursive_vs_direct.py` | `recursive_vs_direct` | Recursive 5-min stepping vs direct multi-horizon, **matched reduced features**, single split. Uses matched *default* LGBM params (an architecture control, not a tuning bake-off) + a step-0 feature-reconstruction sanity assert. |
 | `cdf_recursive_full_oof.py` | `recursive_full_oof` | Recursive vs direct with the **full feature set**, walk-forward OOF, post-meal (anchors with no new meal/bolus). Matched default params. |
 
+## Switch-on test for the optional channels
+
+`channel_ablation.py` is not a CDF — it is the measurement that decides whether a
+flag that ships OFF (`use_hr_dynamics`, `use_gps`, …) may be turned on. Arms run on
+identical folds against the identical persistence denominator, so the per-fold
+lift is paired; these effects are worth thousandths of skill while the raw
+fold-to-fold spread is hundredths, so an unpaired comparison cannot see them.
+
+```bash
+uv run --env-file .env python evaluation/channel_ablation.py       # every arm
+uv run --env-file .env python evaluation/channel_ablation.py hr    # only the HR arms
+```
+
+It prints two tables. **ERA** restricts to the stretch where the channel has data
+("is there signal at all?"). **PRODUCTION** trains on the whole history the way
+`serve/training.py` does ("does the signal survive being diluted by the years
+before the channel existed?"). A flag is only switched on when it wins the
+PRODUCTION table. See `reports/tables/wearable_channel_notes.md` for the current
+readings and why heart rate wins the first table but not yet the second.
+
 ## Notes
 
 - **k-NN neighborhood** (`KNN_K`) and **fold settings** (`N_FOLDS`, `TEST_SPAN`)

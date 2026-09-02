@@ -47,7 +47,16 @@ GRID_SCHEMA = pa.DataFrameSchema(
         ),
         "steps": pa.Column("int64", checks=pa.Check.ge(0), nullable=False),
         "activity_flag": pa.Column(bool, nullable=False, required=False),
+        # Pod activation pulse from the pump; drives time_since_pod.
+        "pod_flag": pa.Column(bool, nullable=False, required=False),
         "hr": pa.Column(float, checks=pa.Check.ge(0), nullable=True, required=False),
+        # Background GPS log; drives the movement and place features.
+        "lat": pa.Column(
+            float, checks=pa.Check.in_range(-90, 90), nullable=True, required=False
+        ),
+        "lon": pa.Column(
+            float, checks=pa.Check.in_range(-180, 180), nullable=True, required=False
+        ),
         "weather_temp": pa.Column(float, nullable=True, required=False),
         # Daily activity totals (per-day context), broadcast per local date.
         "daily_steps": pa.Column(
