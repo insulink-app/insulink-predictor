@@ -143,7 +143,7 @@ def test_user_grid_readings_win_over_overlapping_db_bucket(monkeypatch):
 
 @pytest.mark.parametrize("horizon", [30, 60])
 def test_forecast_shape_and_range(monkeypatch, tiny_model, horizon):
-    monkeypatch.setattr(serve, "_user_grid", lambda uid, readings: _ramp_grid(40))
+    monkeypatch.setattr(serve, "_user_grid", lambda uid, readings, since=None: _ramp_grid(40))
     curve, band, generated_at = serve.forecast("u1", horizon, model=tiny_model)
     assert len(curve) == horizon // tiny_model["grid_minutes"]
     assert all(np.isfinite(curve))
@@ -153,7 +153,7 @@ def test_forecast_shape_and_range(monkeypatch, tiny_model, horizon):
 
 
 def test_forecast_band_brackets_and_is_ordered(monkeypatch, banded_model):
-    monkeypatch.setattr(serve, "_user_grid", lambda uid, readings: _ramp_grid(40))
+    monkeypatch.setattr(serve, "_user_grid", lambda uid, readings, since=None: _ramp_grid(40))
     curve, band, _ = serve.forecast("u1", 30, model=banded_model)
     lo, hi = band[0.1], band[0.9]
     assert len(lo) == len(hi) == len(curve)
@@ -164,7 +164,7 @@ def test_forecast_band_brackets_and_is_ordered(monkeypatch, banded_model):
 
 def test_predict_endpoint_contract(monkeypatch, tiny_model):
     monkeypatch.setattr(serve, "_model_for", lambda uid: tiny_model)
-    monkeypatch.setattr(serve, "_user_grid", lambda uid, readings: _ramp_grid(40))
+    monkeypatch.setattr(serve, "_user_grid", lambda uid, readings, since=None: _ramp_grid(40))
     resp = serve.predict(serve.PredictRequest(user_id="u1", horizon_min=30))
     assert resp["horizon_min"] == 30
     assert [pt["offset_min"] for pt in resp["curve"]] == [5, 10, 15, 20, 25, 30]
@@ -177,7 +177,7 @@ def test_predict_404_when_user_has_no_data(monkeypatch, tiny_model):
     from fastapi import HTTPException
 
     monkeypatch.setattr(serve, "_model_for", lambda uid: tiny_model)
-    monkeypatch.setattr(serve, "_user_grid", lambda uid, readings: None)
+    monkeypatch.setattr(serve, "_user_grid", lambda uid, readings, since=None: None)
     with pytest.raises(HTTPException) as exc:
         serve.predict(serve.PredictRequest(user_id="u1", horizon_min=30))
     assert exc.value.status_code == 404
@@ -275,14 +275,23 @@ def test_lifespan_skips_bootstrap_when_models_exist(monkeypatch, tmp_path):
     assert calls == []  # models present -> no bootstrap training
 
 
+def _window(grid, hours: int, until_hours: int | None = None) -> dict:
+    """Request bounds (epoch ms) covering the last ``hours`` of ``grid``."""
+    tip = int(grid["ts_utc"].iloc[-1].timestamp() * 1000)
+    bounds = {"since": tip - hours * 3_600_000}
+    if until_hours is not None:
+        bounds["until"] = tip - until_hours * 3_600_000
+    return bounds
+
+
 def test_backtest_returns_one_anchor_per_bucket(monkeypatch, banded_model):
     """Every 5-min bucket in the window is an anchor, with its band and baseline."""
     grid = _ramp_grid(60)
     monkeypatch.setattr(serve, "_model_for", lambda uid: banded_model)
-    monkeypatch.setattr(serve, "_user_grid", lambda uid, readings: grid)
+    monkeypatch.setattr(serve, "_user_grid", lambda uid, readings, since=None: grid)
 
     resp = serve.backtest_endpoint(
-        serve.BacktestRequest(user_id="u1", horizon_min=30, hours=1)
+        serve.BacktestRequest(user_id="u1", horizon_min=30, **_window(grid, 1))
     )
 
     points = resp["points"]
@@ -303,15 +312,54 @@ def test_backtest_returns_one_anchor_per_bucket(monkeypatch, banded_model):
 
 
 def test_backtest_anchors_stay_inside_the_window(monkeypatch, tiny_model):
+    grid = _ramp_grid(60)
     monkeypatch.setattr(serve, "_model_for", lambda uid: tiny_model)
-    monkeypatch.setattr(serve, "_user_grid", lambda uid, readings: _ramp_grid(60))
+    monkeypatch.setattr(serve, "_user_grid", lambda uid, readings, since=None: grid)
 
     points = serve.backtest_endpoint(
-        serve.BacktestRequest(user_id="u1", horizon_min=60, hours=2)
+        serve.BacktestRequest(user_id="u1", horizon_min=60, **_window(grid, 2))
     )["points"]
 
     span_min = (points[-1]["ts"] - points[0]["ts"]) / 60_000
     assert span_min <= 120
+
+
+def test_backtest_stops_at_the_requested_end(monkeypatch, tiny_model):
+    """The caller's analysis range ends where it ends — a later bucket is not an
+    anchor even though the grid holds one."""
+    grid = _ramp_grid(60)
+    monkeypatch.setattr(serve, "_model_for", lambda uid: tiny_model)
+    monkeypatch.setattr(serve, "_user_grid", lambda uid, readings, since=None: grid)
+
+    points = serve.backtest_endpoint(
+        serve.BacktestRequest(
+            user_id="u1", horizon_min=30, **_window(grid, 3, until_hours=1)
+        )
+    )["points"]
+
+    tip = int(grid["ts_utc"].iloc[-1].timestamp() * 1000)
+    assert points[-1]["ts"] <= tip - 3_600_000
+    assert points[0]["ts"] >= tip - 3 * 3_600_000
+
+
+def test_backtest_reads_history_before_the_window(monkeypatch, tiny_model):
+    """Features need their lookback filled, so the DB read starts earlier than the
+    first anchor."""
+    grid = _ramp_grid(60)
+    reads: list = []
+    monkeypatch.setattr(serve, "_model_for", lambda uid: tiny_model)
+    monkeypatch.setattr(
+        serve,
+        "_user_grid",
+        lambda uid, readings, since=None: (reads.append(since), grid)[1],
+    )
+
+    bounds = _window(grid, 2)
+    serve.backtest_endpoint(
+        serve.BacktestRequest(user_id="u1", horizon_min=30, **bounds)
+    )
+
+    assert reads[0] < pd.Timestamp(bounds["since"], unit="ms", tz="UTC")
 
 
 def test_backtest_404_when_user_has_no_model(monkeypatch):
@@ -329,11 +377,12 @@ def test_backtest_answer_is_json_serialisable(monkeypatch, banded_model):
 
     from fastapi.encoders import jsonable_encoder
 
+    grid = _ramp_grid(60)
     monkeypatch.setattr(serve, "_model_for", lambda uid: banded_model)
-    monkeypatch.setattr(serve, "_user_grid", lambda uid, readings: _ramp_grid(60))
+    monkeypatch.setattr(serve, "_user_grid", lambda uid, readings, since=None: grid)
 
     resp = serve.backtest_endpoint(
-        serve.BacktestRequest(user_id="u1", horizon_min=30, hours=2)
+        serve.BacktestRequest(user_id="u1", horizon_min=30, **_window(grid, 2))
     )
 
     assert json.loads(json.dumps(jsonable_encoder(resp)))["points"]
