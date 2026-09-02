@@ -273,3 +273,51 @@ def test_lifespan_skips_bootstrap_when_models_exist(monkeypatch, tmp_path):
 
     asyncio.run(run())
     assert calls == []  # models present -> no bootstrap training
+
+
+def test_backtest_returns_one_anchor_per_bucket(monkeypatch, banded_model):
+    """Every 5-min bucket in the window is an anchor, with its band and baseline."""
+    grid = _ramp_grid(60)
+    monkeypatch.setattr(serve, "_model_for", lambda uid: banded_model)
+    monkeypatch.setattr(serve, "_user_grid", lambda uid, readings: grid)
+
+    resp = serve.backtest_endpoint(
+        serve.BacktestRequest(user_id="u1", horizon_min=30, hours=1)
+    )
+
+    points = resp["points"]
+    assert resp["grid_minutes"] == 5
+    # A 1-hour window on a 5-min grid: 13 buckets, tip included.
+    assert len(points) == 13
+    assert [p["ts"] for p in points] == sorted(p["ts"] for p in points)
+    assert all(p["lo_mgdl"] <= p["hi_mgdl"] for p in points)
+    # The baseline is the reading the anchor sits on, which is what the caller
+    # scores the model against.
+    observed = dict(
+        zip(
+            (grid["ts_utc"].astype("int64") // 1_000_000).tolist(),
+            grid["glucose_mgdl"].tolist(),
+        )
+    )
+    assert all(p["anchor_mgdl"] == round(observed[p["ts"]], 1) for p in points)
+
+
+def test_backtest_anchors_stay_inside_the_window(monkeypatch, tiny_model):
+    monkeypatch.setattr(serve, "_model_for", lambda uid: tiny_model)
+    monkeypatch.setattr(serve, "_user_grid", lambda uid, readings: _ramp_grid(60))
+
+    points = serve.backtest_endpoint(
+        serve.BacktestRequest(user_id="u1", horizon_min=60, hours=2)
+    )["points"]
+
+    span_min = (points[-1]["ts"] - points[0]["ts"]) / 60_000
+    assert span_min <= 120
+
+
+def test_backtest_404_when_user_has_no_model(monkeypatch):
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(serve, "_model_for", lambda uid: None)
+    with pytest.raises(HTTPException) as exc:
+        serve.backtest_endpoint(serve.BacktestRequest(user_id="ghost"))
+    assert exc.value.status_code == 404

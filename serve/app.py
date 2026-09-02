@@ -53,7 +53,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from insulink_predictor.config import load_config
 from insulink_predictor.data.align import align
@@ -102,6 +102,12 @@ class PredictRequest(BaseModel):
     user_id: str
     horizon_min: int = 30
     readings: list[Reading] = []  # freshest glucose not yet ingested by the DB
+
+
+class BacktestRequest(BaseModel):
+    user_id: str
+    horizon_min: int = 30
+    hours: int = Field(default=24, ge=1, le=168)  # window back from the grid tip
 
 
 def _engine():
@@ -226,6 +232,83 @@ def forecast(
 
     generated_at = int(last["ts_utc"].iloc[0].timestamp() * 1000)
     return trajectory, band, generated_at
+
+
+def backtest(
+    user_id: str,
+    horizon_min: int,
+    hours: int,
+    model: dict | None = None,
+) -> list[dict]:
+    """What the model would have said at every grid bucket of the last ``hours``.
+
+    One anchor per 5-min bucket, each carrying the ``horizon_min``-ahead point
+    forecast, its band, and the glucose the anchor itself sat on — which is the
+    persistence baseline ``ŷ = g_t`` the ROADMAP scores every model against. The
+    OUTCOMES are deliberately not returned: the caller holds the readings that
+    actually arrived, and comparing the two is its job.
+
+    One DB pull and one feature build for the whole window: ``forecast_curve`` is
+    vectorised over rows, so N anchors cost what one used to.
+
+    **In-sample.** The user's model was trained on this very history, so these
+    residuals flatter it. It answers "how did the forecast track my day", not
+    "how will it generalise" — the honest out-of-sample number is the
+    walk-forward evaluation in ``evaluation/``.
+    """
+    model = model or _model_for(user_id)
+    if model is None:
+        return []
+    grid = _user_grid(user_id, [])
+    if grid is None:
+        return []
+    feat, _ = build_features(grid, _CFG)
+    for col in model["feature_cols"]:  # reindex safety net, as in ``forecast``
+        if col not in feat.columns:
+            feat[col] = np.nan
+    window = feat[
+        (feat["ts_utc"] >= feat["ts_utc"].iloc[-1] - pd.Timedelta(hours=hours))
+        # An anchor over a sensor gap has no glucose to forecast from, and the
+        # ROADMAP is explicit that gaps are marked and excluded, never smoothed.
+        & feat["glucose_mgdl"].notna()
+        & ~feat["sensor_gap"]
+    ]
+    if window.empty:
+        return []
+    step = min(max(1, horizon_min // model["grid_minutes"]), max(model["curve_models"]))
+    cols, delta = model["feature_cols"], model["predict_delta"]
+
+    def column(curve: np.ndarray) -> np.ndarray:
+        return np.clip(curve[:, step - 1], _GLUCOSE_LO, _GLUCOSE_HI)
+
+    predicted = column(forecast_curve(window, model["curve_models"], cols, delta))
+    lo, hi = None, None
+    if model.get("quantile_models"):
+        offsets = model.get("q_offsets") or {}
+        qcurves = forecast_curve_quantiles(
+            window, model["quantile_models"], cols, delta
+        )
+        bands = {
+            q: column(curve + np.asarray(offsets.get(q, 0.0)))
+            for q, curve in qcurves.items()
+        }
+        quantiles = sorted(bands)
+        stacked = np.sort(np.array([bands[q] for q in quantiles]), axis=0)
+        lo, hi = stacked[0], stacked[-1]
+    anchors = (window["ts_utc"].astype("int64") // 1_000_000).to_numpy()
+    observed = window["glucose_mgdl"].to_numpy()
+    points = []
+    for i, anchor_ms in enumerate(anchors):
+        point = {
+            "ts": int(anchor_ms),
+            "mgdl": round(float(predicted[i]), 1),
+            "anchor_mgdl": round(float(observed[i]), 1),
+        }
+        if lo is not None:
+            point["lo_mgdl"] = round(float(lo[i]), 1)
+            point["hi_mgdl"] = round(float(hi[i]), 1)
+        points.append(point)
+    return points
 
 
 # --------------------------------------------------------------------------- #
@@ -353,6 +436,30 @@ def predict(req: PredictRequest) -> dict:
         }
         if qs
         else None,
+    }
+
+
+@app.post("/backtest")
+def backtest_endpoint(req: BacktestRequest) -> dict:
+    """Past forecasts over a window, for a caller that scores them itself.
+
+    Each point is anchored at ``ts`` and predicts ``ts + horizon_min``; the caller
+    matches that against the readings it holds. ``anchor_mgdl`` is the persistence
+    baseline for the same point, so the skill score needs nothing else from here.
+    """
+    model = _model_for(req.user_id)
+    if model is None:
+        raise HTTPException(
+            404,
+            f"no model for user {req.user_id} (not trained yet / insufficient data)",
+        )
+    points = backtest(req.user_id, req.horizon_min, req.hours, model)
+    if not points:
+        raise HTTPException(404, f"no forecastable data for user {req.user_id}")
+    return {
+        "horizon_min": req.horizon_min,
+        "grid_minutes": model["grid_minutes"],
+        "points": points,
     }
 
 
