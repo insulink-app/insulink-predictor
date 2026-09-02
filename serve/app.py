@@ -53,7 +53,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from insulink_predictor.config import load_config
 from insulink_predictor.data.align import align
@@ -120,7 +120,10 @@ class PredictRequest(BaseModel):
 class BacktestRequest(BaseModel):
     user_id: str
     horizon_min: int = 30
-    hours: int = Field(default=24, ge=1, le=168)  # window back from the grid tip
+    # The window to replay, epoch ms. Absent ``until`` means the grid tip, absent
+    # ``since`` means a day before it — the caller's analysis range drives both.
+    since: int | None = None
+    until: int | None = None
 
 
 def _engine():
@@ -149,7 +152,9 @@ def _model_for(user_id: str) -> dict | None:
     return _user_model_cache[user_id][1]
 
 
-def _user_grid(user_id: str, readings: list[Reading]) -> pd.DataFrame | None:
+def _user_grid(
+    user_id: str, readings: list[Reading], since: pd.Timestamp | None = None
+) -> pd.DataFrame | None:
     """Aligned 5-min grid for one user, pulled from the DB (all channels).
 
     ``readings`` (the caller's freshest glucose) are injected as extra
@@ -167,7 +172,7 @@ def _user_grid(user_id: str, readings: list[Reading]) -> pd.DataFrame | None:
     longer than the window therefore gets a 404 rather than a forecast anchored to
     a weeks-old tip, which is the right answer either way.
     """
-    since = pd.Timestamp.utcnow() - pd.Timedelta(days=SERVE_WINDOW_DAYS)
+    since = since or pd.Timestamp.utcnow() - pd.Timedelta(days=SERVE_WINDOW_DAYS)
     tables = fetch_tables(_CFG, engine=_engine(), since=since, user_ids=[user_id])
     if readings:
         tip = pd.DataFrame(
@@ -256,10 +261,11 @@ def forecast(
 def backtest(
     user_id: str,
     horizon_min: int,
-    hours: int,
+    since: pd.Timestamp,
+    until: pd.Timestamp | None = None,
     model: dict | None = None,
 ) -> list[dict]:
-    """What the model would have said at every grid bucket of the last ``hours``.
+    """What the model would have said at every grid bucket between the bounds.
 
     One anchor per 5-min bucket, each carrying the ``horizon_min``-ahead point
     forecast, its band, and the glucose the anchor itself sat on — which is the
@@ -268,7 +274,10 @@ def backtest(
     actually arrived, and comparing the two is its job.
 
     One DB pull and one feature build for the whole window: ``forecast_curve`` is
-    vectorised over rows, so N anchors cost what one used to.
+    vectorised over rows, so N anchors cost what one used to. The read starts
+    ``SERVE_WINDOW_DAYS`` before ``since`` so the first anchor's features have the
+    same history behind them as every later one — a feature is only comparable
+    when its lookback is filled.
 
     **In-sample.** The user's model was trained on this very history, so these
     residuals flatter it. It answers "how did the forecast track my day", not
@@ -278,7 +287,8 @@ def backtest(
     model = model or _model_for(user_id)
     if model is None:
         return []
-    grid = _user_grid(user_id, [])
+    read_from = since - pd.Timedelta(days=SERVE_WINDOW_DAYS)
+    grid = _user_grid(user_id, [], read_from)
     if grid is None:
         return []
     feat, _ = build_features(grid, _CFG)
@@ -286,7 +296,8 @@ def backtest(
         if col not in feat.columns:
             feat[col] = np.nan
     window = feat[
-        (feat["ts_utc"] >= feat["ts_utc"].iloc[-1] - pd.Timedelta(hours=hours))
+        (feat["ts_utc"] >= since)
+        & (feat["ts_utc"] <= (until if until is not None else feat["ts_utc"].iloc[-1]))
         # An anchor over a sensor gap has no glucose to forecast from, and the
         # ROADMAP is explicit that gaps are marked and excluded, never smoothed.
         & feat["glucose_mgdl"].notna()
@@ -458,6 +469,13 @@ def predict(req: PredictRequest) -> dict:
     }
 
 
+def _bound(epoch_ms: int | None) -> pd.Timestamp | None:
+    """One request bound as a UTC timestamp, ``None`` when the caller omitted it."""
+    if epoch_ms is None:
+        return None
+    return pd.Timestamp(epoch_ms, unit="ms", tz="UTC")
+
+
 @app.post("/backtest")
 def backtest_endpoint(req: BacktestRequest) -> dict:
     """Past forecasts over a window, for a caller that scores them itself.
@@ -472,7 +490,11 @@ def backtest_endpoint(req: BacktestRequest) -> dict:
             404,
             f"no model for user {req.user_id} (not trained yet / insufficient data)",
         )
-    points = backtest(req.user_id, req.horizon_min, req.hours, model)
+    until = _bound(req.until)
+    since = _bound(req.since) or (
+        (until or pd.Timestamp.utcnow()) - pd.Timedelta(hours=24)
+    )
+    points = backtest(req.user_id, req.horizon_min, since, until, model)
     if not points:
         raise HTTPException(404, f"no forecastable data for user {req.user_id}")
     return {
