@@ -148,6 +148,15 @@ class ModelConfig(BaseModel):
     excursion_weight_alpha: float = 0.0
     excursion_weight_cap: float = 3.0
 
+    # Fade old rows out instead of cutting them off: weight = 0.5^(age/half_life),
+    # age measured from the newest training row. A user's response drifts (sensor
+    # eras, pods, seasons, changing sensitivity), yet every row currently trains
+    # with equal weight. Hard-bounding the training window was measured to backfire
+    # (wearable_channel_notes.md: -0.0017, worst fold below persistence) because it
+    # throws volume away; halving keeps the volume and still lets the recent months
+    # lead. 0 disables. Retest with `evaluation/channel_ablation.py recency`.
+    recency_half_life_days: float = 0.0
+
     # Physiologically-signed monotone constraints on the therapy channels (with the
     # delta target): more carbs-on-board can only raise the forecast, more
     # insulin-on-board can only lower it. Curbs over-fitting on excursions and is a

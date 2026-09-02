@@ -124,6 +124,38 @@ def _excursion_weight(delta: np.ndarray, cfg: Config) -> np.ndarray | None:
     )
 
 
+def recency_weight(rows: pd.DataFrame, cfg: Config) -> np.ndarray | None:
+    """Sample weights that fade with a row's age, newest row = 1.0.
+
+    Age is measured against the newest row of ``rows``, not against wall-clock now,
+    so a walk-forward fold weights its own training data the same way production
+    does. ``None`` when the half-life is 0, which is the committed default.
+    """
+    half_life = cfg.model.recency_half_life_days
+    if half_life <= 0:
+        return None
+    age_days = (rows["ts_utc"].max() - rows["ts_utc"]).dt.total_seconds() / 86_400.0
+    return np.power(0.5, age_days.to_numpy() / half_life)
+
+
+def sample_weight(
+    rows: pd.DataFrame, delta: np.ndarray, cfg: Config
+) -> np.ndarray | None:
+    """The training weights in force, or ``None`` when every row weighs the same.
+
+    Excursion and recency answer different questions (which rows matter, and which
+    era does), so when both are on they multiply.
+    """
+    weights = [
+        weight
+        for weight in (_excursion_weight(delta, cfg), recency_weight(rows, cfg))
+        if weight is not None
+    ]
+    if not weights:
+        return None
+    return np.prod(weights, axis=0)
+
+
 def train_lgbm(
     train: pd.DataFrame, feature_cols: list[str], cfg: Config
 ) -> dict[int, LGBMRegressor]:
@@ -149,7 +181,7 @@ def train_lgbm(
         y = excursion if delta else train.loc[mask, f"y_{h}"].to_numpy()
         params = tuned.get(hm) if tuned is not None else None
         model = _make_regressor(cfg, feature_cols, hm, params=params)
-        model.fit(X, y, sample_weight=_excursion_weight(excursion, cfg))
+        model.fit(X, y, sample_weight=sample_weight(train.loc[mask], excursion, cfg))
         models[h] = model
     return models
 

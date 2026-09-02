@@ -43,13 +43,25 @@ from insulink_predictor.models.lgbm import make_pred_fn, train_lgbm
 N_FOLDS = 8
 BASELINE = "committed"
 
-# name -> the feature flags it overrides, relative to the committed config.
+# name -> the config it overrides, relative to the committed one, per section.
 ARMS: dict[str, dict] = {
     "committed": {},
-    "no_hr": {"use_hr": False},
-    "hr_dynamics": {"use_hr_dynamics": True},
-    "gps": {"use_gps": True},
-    "hr_dynamics+gps": {"use_hr_dynamics": True, "use_gps": True},
+    "no_hr": {"features": {"use_hr": False}},
+    "hr_dynamics": {"features": {"use_hr_dynamics": True}},
+    "gps": {"features": {"use_gps": True}},
+    "hr_dynamics+gps": {"features": {"use_hr_dynamics": True, "use_gps": True}},
+    # Fade old rows instead of cutting them off. Three half-lives, because the
+    # right one is an empirical question: too short throws away the volume a hard
+    # window cut already lost on, too long is indistinguishable from off.
+    "recency_30d": {"model": {"recency_half_life_days": 30.0}},
+    "recency_90d": {"model": {"recency_half_life_days": 90.0}},
+    "recency_180d": {"model": {"recency_half_life_days": 180.0}},
+    # The learner knobs that have only ever been measured on synthetic data. Their
+    # config comments all say "re-run on real data before enabling"; these arms are
+    # that run.
+    "excursion_w": {"model": {"excursion_weight_alpha": 1.0}},
+    "monotone": {"model": {"use_monotone": True}},
+    "huber": {"model": {"objective": "huber"}},
 }
 
 # Which channel each arm needs, so the "era" window can be found from the data.
@@ -66,9 +78,22 @@ def era_start(grid: pd.DataFrame, arms: list[str]) -> pd.Timestamp:
     return max(starts) if starts else grid["ts_utc"].min()
 
 
+def apply_arm(cfg, arm: str) -> None:
+    """Reset ``cfg`` to the committed config, then apply this arm's overrides.
+
+    Every section starts from committed on each arm, so the arms stay independent
+    of the order they run in.
+    """
+    committed = load_config()
+    overrides = ARMS[arm]
+    for section in ("features", "model"):
+        base = getattr(committed, section).model_dump()
+        merged = {**base, **overrides.get(section, {})}
+        setattr(cfg, section, type(getattr(cfg, section))(**merged))
+
+
 def run(grid: pd.DataFrame, arms: list[str], test_span: float, label: str) -> None:
     cfg = load_config()
-    cfg.model.auto_tune = False  # frozen params: deterministic, and the arms are paired
 
     def lgbm(train, cols, _cfg):
         return make_pred_fn(
@@ -77,8 +102,8 @@ def run(grid: pd.DataFrame, arms: list[str], test_span: float, label: str) -> No
 
     frames = []
     for arm in arms:
-        base = load_config().features.model_dump()
-        cfg.features = type(cfg.features)(**{**base, **ARMS[arm]})
+        apply_arm(cfg, arm)
+        cfg.model.auto_tune = False  # frozen params: deterministic, and arms are paired
         supervised, feature_cols = build_supervised(cfg, grid)
         frames.append(
             backtest_models(

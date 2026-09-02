@@ -46,6 +46,7 @@ from insulink_predictor.models.events import (
     train_curve_models,
     train_quantile_curve_models,
 )
+from insulink_predictor.models.lgbm import recency_weight
 from insulink_predictor.models.tuning import tune_lgbm
 
 log = logging.getLogger("insulink.training")
@@ -147,7 +148,12 @@ def _evaluate_config(
 ) -> dict[int, float | None]:
     """Train curve models on ``train`` with ``params_by_step`` and score on ``holdout``."""
     models = train_curve_models(
-        train, feature_cols, max_step, cfg.features.predict_delta, params_by_step
+        train,
+        feature_cols,
+        max_step,
+        cfg.features.predict_delta,
+        params_by_step,
+        recency_weight(train, cfg),
     )
     return _curve_skill(models, feature_cols, holdout, cfg, cfg.features.predict_delta)
 
@@ -241,7 +247,12 @@ def train_user_model(
 
     # --- promote: refit the winning params on ALL data, then write atomically --
     models = train_curve_models(
-        sup, feature_cols, max_step, cfg.features.predict_delta, params_by_step=pbs
+        sup,
+        feature_cols,
+        max_step,
+        cfg.features.predict_delta,
+        params_by_step=pbs,
+        weights=recency_weight(sup, cfg),
     )
     # Uncertainty band. Fit on `train` only and conformally recalibrated on the
     # untouched `holdout`, so the offsets measure real coverage rather than the
