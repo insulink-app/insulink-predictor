@@ -12,12 +12,16 @@ features, and a continuous drip in it would make "a bolus happened" true in ever
 bucket. ``features.build`` sums the two only where summing is correct — insulin on
 board and its rate of action.
 
-**Where the doses actually are: ``nutrition_meals``, not ``bolus_entries``.** The
-app logs every dose as a meal row (``carbs``, the ``bolus`` it was dosed with, and
-the ``glucose`` it was dosed at) via ``/nutrition/meals/sync/``. ``bolus_entries`` is
-the Dexcom-shaped table — its entity exists in the API but no controller writes it,
-so it is empty in production. Both are read here: same three signals, different
-column names, whichever is populated wins.
+**The doses arrive in two tables, one after the other.** The app now logs every
+dose as a meal row (``carbs``, the ``bolus`` it was dosed with, and the ``glucose``
+it was dosed at) via ``/nutrition/meals/sync/``; the Dexcom-shaped ``bolus_entries``
+carries the same three signals under different column names and holds the earlier
+history. Measured 2026-08-23: ``bolus_entries`` runs 2025-09-22 to 2026-07-04 and
+``nutrition_meals`` takes over from 2026-07-19, sharing **zero** five-minute
+buckets. So both are read and concatenated into one continuous dose history — the
+sequence is why that adds up rather than double-counting. Should they ever overlap,
+``align`` would sum the two into one bucket, which would be wrong; the check is a
+bucket intersection between the tables.
 
 Confirmed against a real data sample:
 - ``recorded_at`` is **unix epoch milliseconds**; ``glucose`` is **mg/dL** (also
@@ -30,7 +34,18 @@ Confirmed against a real data sample:
 - ``sport_measurements.type`` includes ``WEIGHT`` (a user-static attribute, not a
   30-60 min forecasting signal); only heart-rate/steps types feed the grid. In
   practice it holds only daily STEPS/DISTANCE/CALORIES + WEIGHT — no HR.
-- heart rate comes from ``health_pulse_samples.bpm`` (~1/min), its own table.
+- heart rate comes from ``health_pulse_samples.bpm`` (~1/min), its own table, and
+  it is dense: 93 % of buckets in the era it covers, median 100 % per day. The 1 Hz
+  live relay is a different path (an in-memory cache in the API) and never lands
+  here. See ``reports/tables/wearable_channel_notes.md``.
+- ``location_entries`` is a dense background GPS log (~1 fix/min at rest, a stream
+  while moving) -> the only continuous movement signal here, since intraday steps
+  are empty and workouts are logged a few dozen times a year.
+- ``pumps`` holds one row per pod, and ``registered_at`` is when that pod started
+  delivering. That is the whole forecasting signal it carries: a cannula absorbs
+  worse the longer it sits, so the age of the current pod modulates how much drop
+  a given amount of insulin on board actually produces. Mapped to a ``pod_flag``
+  pulse -> ``time_since_pod`` (see ``_pod_block``).
 
 Design: I/O (``connect`` / ``fetch_tables`` / ``inspect``) is separated from pure
 transformation (``assemble_raw`` and the unit/timestamp helpers) so the mapping
@@ -68,6 +83,9 @@ RAW_COLUMNS = [
     "weather_temp",
     "daily_steps",
     "daily_distance",
+    "pod_flag",
+    "lat",
+    "lon",
     "isf",
     "icr",
 ]
@@ -172,6 +190,9 @@ def _channel_block(user_id, ts_utc, **channels) -> pd.DataFrame:
         "weather_temp": np.full(n, np.nan),
         "daily_steps": np.full(n, np.nan),
         "daily_distance": np.full(n, np.nan),
+        "pod_flag": np.zeros(n, dtype=bool),
+        "lat": np.full(n, np.nan),
+        "lon": np.full(n, np.nan),
     }
     block.update({k: np.asarray(v) for k, v in channels.items()})
     return pd.DataFrame(block)
@@ -245,6 +266,59 @@ def _basal_block(
     )
 
 
+def _pod_block(
+    frame: Optional[pd.DataFrame], pg: PostgresConfig
+) -> Optional[pd.DataFrame]:
+    """``pumps`` mapped to a ``pod_flag`` pulse at each pod's activation, or None.
+
+    A pod is a cannula sitting in one spot for three days, and absorption at that
+    spot degrades as it ages: the same units act more slowly late in a pod's life
+    than on the day it was placed. So the useful quantity is not which pod is on,
+    but how long it has been on — ``features.build`` turns this pulse into
+    ``time_since_pod`` with the same helper that produces ``time_since_meal``.
+
+    ``expires_at`` and ``discarded_at`` are ignored on purpose: a pod runs until
+    the next one starts, so the next pulse already ends the previous pod's clock,
+    and the nominal expiry says nothing about when the user actually swapped.
+    """
+    if frame is None or not len(frame):
+        return None
+    return _channel_block(
+        frame["user_id"],
+        to_datetime_utc(frame["registered_at"], pg.ts_unit),
+        pod_flag=np.ones(len(frame), dtype=bool),
+    )
+
+
+def _location_block(
+    frame: Optional[pd.DataFrame], pg: PostgresConfig
+) -> Optional[pd.DataFrame]:
+    """``location_entries`` mapped to the ``lat``/``lon`` channels, or None.
+
+    The app's background sampler writes these all day — roughly one fix a minute
+    at rest and a dense stream while moving — which makes this the only
+    *continuous* movement signal the deployment has. The intraday ``steps``
+    channel is empty and logged workouts are rare, so everyday movement (a walk to
+    the station, an afternoon in town) reaches the model through here or not at
+    all. ``features.build`` turns the positions into speed, trailing distance and
+    place familiarity; the coordinates themselves are never a feature.
+
+    Implausible fixes are dropped rather than clamped: a 0/0 placeholder or an
+    out-of-range value is a broken fix, and a broken fix invents movement.
+    """
+    if frame is None or not len(frame):
+        return None
+    lat = pd.to_numeric(frame["latitude"], errors="coerce").to_numpy(dtype=float)
+    lon = pd.to_numeric(frame["longitude"], errors="coerce").to_numpy(dtype=float)
+    ok = (np.abs(lat) <= 90.0) & (np.abs(lon) <= 180.0) & ~((lat == 0.0) & (lon == 0.0))
+    return _channel_block(
+        frame["user_id"],
+        to_datetime_utc(frame["recorded_at"], pg.ts_unit),
+        lat=np.where(ok, lat, np.nan),
+        lon=np.where(ok, lon, np.nan),
+    )
+
+
 def assemble_raw(tables: dict[str, pd.DataFrame], cfg: Config) -> pd.DataFrame:
     """Map fetched tables into the RAW contract frame (pure; align-ready).
 
@@ -283,6 +357,16 @@ def assemble_raw(tables: dict[str, pd.DataFrame], cfg: Config) -> pd.DataFrame:
     basal = _basal_block(tables.get("basal_entries"), pg)
     if basal is not None:
         blocks.append(basal)
+
+    # --- pod changes (the pump's own new signal) ---------------------------
+    pod = _pod_block(tables.get("pumps"), pg)
+    if pod is not None:
+        blocks.append(pod)
+
+    # --- GPS (the only continuous movement signal this deployment has) -----
+    loc = _location_block(tables.get("location_entries"), pg)
+    if loc is not None:
+        blocks.append(loc)
 
     # --- health_pulse_samples (the real HR source) -------------------------
     # The dedicated pulse table, ~1 sample/min; align() means it per bucket. This
@@ -477,6 +561,12 @@ def fetch_tables(
         "nutrition_meals": ('user_id, "time", carbs, glucose, bolus', '"time"'),
         # Basal delivered per window by the pump driver, stamped at the window end.
         "basal_entries": ("user_id, recorded_at, insulin", "recorded_at"),
+        # Only when each pod started; that is the whole signal (see _pod_block).
+        "pumps": ("user_id, registered_at", "registered_at"),
+        "location_entries": (
+            "user_id, recorded_at, latitude, longitude",
+            "recorded_at",
+        ),
         "sport_measurements": ("user_id, recorded_at, type, value", "recorded_at"),
         "health_pulse_samples": ("user_id, recorded_at, bpm", "recorded_at"),
         "sport_trainings": (
@@ -579,6 +669,7 @@ def inspect(cfg: Config, engine=None) -> dict:
         "health_pulse_samples",
         "sport_trainings",
         "sport_workouts",
+        "location_entries",
         "events",
         "users",
         "user_settings",
