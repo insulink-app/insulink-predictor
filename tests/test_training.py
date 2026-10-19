@@ -100,3 +100,11 @@ def test_gate_keeps_incumbent_when_holdout_too_thin():
         {30: None, 60: None}, {30: 0.2, 60: 0.2}, has_incumbent=True
     )
     assert ok is False and "incumbent" in reason
+
+
+def test_models_of_users_no_longer_in_the_data_are_removed(tmp_path):
+    """A deleted account leaves no rows; its model must not stay on disk."""
+    for user in ("kept", "gone"):
+        joblib.dump({"user": user}, tmp_path / f"{user}.joblib")
+    training._forget_models_of_gone_users({"kept"}, tmp_path)
+    assert sorted(path.stem for path in tmp_path.glob("*.joblib")) == ["kept"]

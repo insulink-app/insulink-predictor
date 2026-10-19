@@ -41,3 +41,6 @@ reports/curves_*.png
 *.ipr
 *.iws
 .idea/
+# Statistics read off a real database (row counts, value ranges, settings
+# samples) are health data and stay out of this public repo.
+reports/tables/db_inspection.json
