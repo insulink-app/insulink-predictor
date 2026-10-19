@@ -20,7 +20,8 @@ the true tip rather than a stale DB snapshot.
 
 Run:  ``uv run uvicorn serve.app:app --host 0.0.0.0 --port 8000``
 Env: ``DATABASE_URL``/``GF_PG__*`` (DB), ``MODELS_DIR`` (per-user model dir),
-``ENABLE_SCHEDULER`` (default on), ``RETRAIN_HOUR`` (local hour, default 3).
+``ENABLE_SCHEDULER`` (default on), ``RETRAIN_HOUR`` (local hour, default 3),
+``ADMIN_TOKEN`` (enables ``POST /admin/retrain`` behind ``Authorization: Bearer``).
 Run only ONE instance/worker with the scheduler enabled.
 
 Each curve point carries an uncertainty band (``lo_mgdl``/``hi_mgdl``, the
@@ -45,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import hmac
 import logging
 import os
 from contextlib import asynccontextmanager, suppress
@@ -52,8 +54,8 @@ from contextlib import asynccontextmanager, suppress
 import joblib
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi import FastAPI, Header, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from insulink_predictor.config import load_config
 from insulink_predictor.data.align import align
@@ -106,19 +108,28 @@ SERVE_WINDOW_DAYS = int(os.environ.get("SERVE_WINDOW_DAYS", "0")) or max(
 )
 
 
+# A user id becomes a file name (``MODELS_DIR/<user_id>.joblib``, loaded with
+# joblib, i.e. pickle), so it is held to this shape at the edge: real ids are
+# UUIDs, and nothing that could leave the models directory gets through.
+USER_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
+
+# Guards POST /admin/retrain; unset leaves the endpoint switched off.
+_ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
+
+
 class Reading(BaseModel):
     ts: int  # epoch milliseconds
     mgdl: float
 
 
 class PredictRequest(BaseModel):
-    user_id: str
+    user_id: str = Field(pattern=USER_ID_PATTERN)
     horizon_min: int = 30
     readings: list[Reading] = []  # freshest glucose not yet ingested by the DB
 
 
 class BacktestRequest(BaseModel):
-    user_id: str
+    user_id: str = Field(pattern=USER_ID_PATTERN)
     horizon_min: int = 30
     # The window to replay, epoch ms. Absent ``until`` means the grid tip, absent
     # ``since`` means a day before it — the caller's analysis range drives both.
@@ -504,7 +515,24 @@ def backtest_endpoint(req: BacktestRequest) -> dict:
     }
 
 
+def _require_admin(authorization: str | None) -> None:
+    """404 while no ``ADMIN_TOKEN`` is configured, 403 for a wrong one.
+
+    A retrain of every user is minutes of CPU, so whatever can reach this
+    service inside the compose network must not be able to start one.
+    """
+    if not _ADMIN_TOKEN:
+        raise HTTPException(404, "not found")
+    expected = f"Bearer {_ADMIN_TOKEN}"
+    if not hmac.compare_digest((authorization or "").encode(), expected.encode()):
+        raise HTTPException(403, "forbidden")
+
+
 @app.post("/admin/retrain")
-async def admin_retrain(user_id: str | None = None) -> dict:
+async def admin_retrain(
+    user_id: str | None = Query(None, pattern=USER_ID_PATTERN),
+    authorization: str | None = Header(None),
+) -> dict:
     """Trigger a tune+train now — one ``user_id`` (fast) or all users (slow)."""
+    _require_admin(authorization)
     return await asyncio.to_thread(_run_retrain, user_id)

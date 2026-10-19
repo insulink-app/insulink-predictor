@@ -386,3 +386,40 @@ def test_backtest_answer_is_json_serialisable(monkeypatch, banded_model):
     )
 
     assert json.loads(json.dumps(jsonable_encoder(resp)))["points"]
+
+
+# --------------------------------------------------------------------------- #
+# The edge: user ids become file names, and retraining costs minutes of CPU.   #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("user_id", ["../../etc/passwd", "a/b", "", "x" * 65])
+def test_a_user_id_that_is_no_plain_name_is_refused(user_id):
+    """The id is joined into MODELS_DIR/<id>.joblib and loaded with pickle."""
+    with pytest.raises(ValueError):
+        serve.PredictRequest(user_id=user_id)
+    with pytest.raises(ValueError):
+        serve.BacktestRequest(user_id=user_id)
+
+
+def test_a_uuid_user_id_is_accepted():
+    request = serve.PredictRequest(user_id="9f1c2a64-1b7e-4c0e-9a51-0e4f6c2d8b31")
+    assert request.user_id.startswith("9f1c2a64")
+
+
+def test_admin_retrain_is_off_without_a_token(monkeypatch):
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(serve, "_ADMIN_TOKEN", "")
+    with pytest.raises(HTTPException) as refused:
+        serve._require_admin("Bearer anything")
+    assert refused.value.status_code == 404
+
+
+def test_admin_retrain_needs_the_configured_token(monkeypatch):
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(serve, "_ADMIN_TOKEN", "s3cret")
+    for wrong in (None, "", "Bearer wrong", "s3cret"):
+        with pytest.raises(HTTPException) as refused:
+            serve._require_admin(wrong)
+        assert refused.value.status_code == 403
+    serve._require_admin("Bearer s3cret")

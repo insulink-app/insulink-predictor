@@ -301,6 +301,21 @@ def train_user_model(
     }
 
 
+def _forget_models_of_gone_users(users: set[str], models_dir: Path) -> None:
+    """Delete the model of every user no longer eligible.
+
+    A deleted account (or one that withdrew consent) leaves no rows to train
+    on, but its model would otherwise stay on disk, derived from its data, for
+    good.
+    """
+    if not models_dir.exists():
+        return
+    for path in models_dir.glob("*.joblib"):
+        if path.stem not in users:
+            log.info("removing the model of user %s, no longer in the data", path.stem)
+            path.unlink()
+
+
 def retrain_all(
     cfg: Config | None = None, engine=None, models_dir: Path | None = None
 ) -> dict:
@@ -309,6 +324,10 @@ def retrain_all(
     engine = engine or connect(cfg)
     users = distinct_user_ids(cfg, engine)
     log.info("retrain_all: %d candidate user(s)", len(users))
+
+    _forget_models_of_gone_users(
+        set(users), Path(models_dir) if models_dir is not None else MODELS_DIR
+    )
 
     results: list[dict] = []
     for u in users:
